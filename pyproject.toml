@@ -1,0 +1,40 @@
+[project]
+name = "simcc-maria"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "meirelesgc",email = "geu_costa@outlook.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13,<4.0"
+dependencies = [
+    "asyncpg (>=0.31.0,<0.32.0)",
+    "polars (>=1.44.2,<2.0.0)",
+    "fastexcel (>=0.21.0,<0.22.0)",
+    "pydantic-settings (>=2.15.0,<3.0.0)",
+    "langchain (>=1.4.3,<2.0.0)",
+    "langchain-openai (>=1.6.7,<2.0.0)",
+    "rich (>=15.0.0,<16.0.0)",
+    "prompt-toolkit (>=3.0.53,<4.0.0)"
+]
+
+[project.scripts]
+ingest = "simcc_maria.ingest:main"
+load-db = "simcc_maria.load_db:main"
+maria = "simcc_maria.cli:main"
+evaluate = "simcc_maria.evaluate:main"
+
+[tool.poetry]
+packages = [{include = "simcc_maria", from = "src"}]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+docs = [
+    "mkdocs-material (>=9.7.7,<10.0.0)"
+]
+dev = [
+    "pytest (>=9.1.1,<10.0.0)"
+]

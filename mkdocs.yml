@@ -1,0 +1,50 @@
+site_name: SIMCC Maria
+site_description: Chatbot para perguntas em linguagem natural sobre dados de fomento à pesquisa
+docs_dir: docs
+
+theme:
+  name: material
+  language: pt-BR
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Modo escuro
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Modo claro
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Início: index.md
+  - Dados:
+      - Visão geral: dados/visao-geral.md
+      - Dicionário de dados: dados/dicionario.md
+      - Qualidade e cuidados: dados/qualidade.md
+      - Pipeline (xlsx → csv): dados/pipeline.md
+      - SIMCC (complementar): dados/simcc.md
+  - Chatbot:
+      - Como usar: chatbot/uso.md
+      - Arquitetura: chatbot/arquitetura.md
