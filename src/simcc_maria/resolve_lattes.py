@@ -1,15 +1,16 @@
-"""Substitui CPF por Lattes ID usando a API do SIMCC.
+"""Replaces CPF with Lattes ID using the SIMCC API.
 
-Uso:
-    poetry run resolve-lattes ENTRADA.xlsx SAIDA.parquet [--limit N] [--retry-failed]
+Usage:
+    poetry run resolve-lattes INPUT.xlsx data/raw/scholarships.parquet [--limit N] [--retry-failed]
 
-- Cada CPF distinto é consultado uma única vez.
-- Os resultados ficam em cache (data/cache/cpf_lattes.jsonl), indexados pelo
-  SHA-256 do CPF, nunca pelo CPF em texto puro. Execuções interrompidas
-  retomam de onde pararam.
-- A saída não contém CPF: a coluna vira `lattes_id` + `lattes_status`.
-- Nenhum CPF é impresso: erros mostram só o tipo da exceção (a mensagem do
-  httpx inclui a URL, que contém o CPF).
+- Each distinct CPF is requested once.
+- Results are cached (data/cache/cpf_lattes.jsonl) keyed by the SHA-256 of the
+  CPF, never the plain CPF. Interrupted runs resume where they stopped.
+  A CPF hash can be brute-forced: delete the cache after the conversion.
+- The output has no CPF: the column becomes `lattes_id` + `lattes_status`, and
+  the other columns are renamed to the repository standard (English).
+- No CPF is ever printed: errors show only the exception type (httpx messages
+  include the URL, which contains the CPF).
 """
 
 import argparse
@@ -26,6 +27,7 @@ import httpx
 import polars as pl
 
 from simcc_maria.config import ROOT
+from simcc_maria.ingest import SOURCE_COLUMNS
 
 API = "https://simcc.uesc.br/v3/api/getIdentificadorCNPq"
 CACHE = ROOT / "data" / "cache" / "cpf_lattes.jsonl"
@@ -36,13 +38,13 @@ TIMEOUT_S = 30
 MAX_ATTEMPTS = 3
 
 # lattes_status
-OK = "ok"
-NOT_FOUND = "nao_encontrado"  # API respondeu 500 "Error processing CNPq request" em todas as tentativas
-FOREIGN = "documento_estrangeiro"  # não é CPF (ex.: passaporte)
-ERROR = "erro"  # falha de rede/timeout/resposta inesperada; refeito com --retry-failed
+OK = "found"
+NOT_FOUND = "not_found"  # API answered 500 "Error processing CNPq request" on every attempt
+FOREIGN = "foreign_document"  # not a CPF (e.g. passport)
+ERROR = "error"  # network/timeout/unexpected answer; redone by --retry-failed
 
 
-# Documentos pessoais digitados em texto livre (ex.: no resumo do projeto)
+# Personal documents typed in free text (e.g. in the project abstract)
 CPF_LABELED = re.compile(r"(\bCPF[\s.:ºo°n]*)\d[\d.\-]{9,13}\d", re.IGNORECASE)
 CPF_FORMATTED = re.compile(r"(?<![\d.])\d{3}\.\d{3}\.\d{3}-\d{2}(?![\d.])")
 CPF_BARE = re.compile(r"(?<!\d)\d{11}(?!\d)")
@@ -61,11 +63,11 @@ def cpf_valid(digits: str) -> bool:
 
 
 def mask_documents(text: str | None) -> str | None:
-    """Mascara CPF (rotulado, ou com dígito verificador válido) e RG."""
+    """Masks CPF (labeled, or with a valid check digit) and RG."""
     if not text:
         return text
-    text = CPF_LABELED.sub(r"\1[CPF removido]", text)  # precedido de "CPF": sempre
-    for pattern in (CPF_FORMATTED, CPF_BARE):  # sem rótulo: só se o dígito verificador bater
+    text = CPF_LABELED.sub(r"\1[CPF removido]", text)  # preceded by "CPF": always
+    for pattern in (CPF_FORMATTED, CPF_BARE):  # unlabeled: only with a valid check digit
         text = pattern.sub(
             lambda m: "[CPF removido]" if cpf_valid(re.sub(r"\D", "", m.group())) else m.group(), text
         )
@@ -81,7 +83,7 @@ def load_cache() -> dict[str, dict]:
     if CACHE.exists():
         for line in CACHE.read_text().splitlines():
             rec = json.loads(line)
-            cache[rec["key"]] = rec  # a última linha de cada chave prevalece
+            cache[rec["key"]] = rec  # the last line of each key wins
     return cache
 
 
@@ -107,7 +109,7 @@ async def resolve(cpfs: list[str], retry_failed: bool) -> dict[str, dict]:
     cache = load_cache()
     redo = {ERROR, NOT_FOUND} if retry_failed else {ERROR}
     todo = [c for c in cpfs if cpf_key(c) not in cache or cache[cpf_key(c)]["status"] in redo]
-    print(f"{len(cpfs)} CPFs distintos · {len(cpfs) - len(todo)} no cache · {len(todo)} a consultar")
+    print(f"{len(cpfs)} distinct CPFs · {len(cpfs) - len(todo)} cached · {len(todo)} to request")
 
     CACHE.parent.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(CONCURRENCY)
@@ -128,7 +130,7 @@ async def resolve(cpfs: list[str], retry_failed: bool) -> dict[str, dict]:
                 if done % 250 == 0 or done == len(todo):
                     rate = done / (time.monotonic() - start)
                     eta = (len(todo) - done) / rate if rate else 0
-                    print(f"  {done}/{len(todo)} · {dict(counts)} · {rate:.1f}/s · faltam ~{eta / 60:.0f} min", flush=True)
+                    print(f"  {done}/{len(todo)} · {dict(counts)} · {rate:.1f}/s · ~{eta / 60:.0f} min left", flush=True)
 
             await asyncio.gather(*(worker(c) for c in todo))
     return cache
@@ -136,17 +138,17 @@ async def resolve(cpfs: list[str], retry_failed: bool) -> dict[str, dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("entrada", type=Path)
-    parser.add_argument("saida", type=Path)
-    parser.add_argument("--limit", type=int, help="consulta só os N primeiros CPFs distintos (teste)")
-    parser.add_argument("--retry-failed", action="store_true", help="refaz também os nao_encontrado")
+    parser.add_argument("input", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--limit", type=int, help="request only the first N distinct CPFs (test)")
+    parser.add_argument("--retry-failed", action="store_true", help="also retry not_found")
     args = parser.parse_args()
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="from_arrow", category=FutureWarning)
-        df = pl.read_excel(args.entrada, infer_schema_length=0)
+        df = pl.read_excel(args.input, infer_schema_length=0)
 
-    # O Excel pode ter perdido zeros à esquerda; documentos com letras não são CPF
+    # Excel may have dropped leading zeros; documents with letters are not CPFs
     doc = pl.col(CPF_COLUMN).str.strip_chars()
     df = df.with_columns(
         pl.when(doc.str.contains(r"^\d+$")).then(doc.str.zfill(11)).otherwise(doc).alias(CPF_COLUMN)
@@ -158,7 +160,7 @@ def main() -> None:
 
     cache = asyncio.run(resolve(cpfs, args.retry_failed))
     if args.limit:
-        return  # modo teste: só aquece o cache
+        return  # test mode: only warms the cache
 
     keys = df[CPF_COLUMN].map_elements(cpf_key, return_dtype=pl.String)
     df = df.with_columns(
@@ -169,19 +171,20 @@ def main() -> None:
         .alias("lattes_status"),
     )
     out = df.select("lattes_id", "lattes_status", pl.exclude(CPF_COLUMN, "lattes_id", "lattes_status"))
+    out = out.rename({k: v for k, v in SOURCE_COLUMNS.items() if k in out.columns})
     text_cols = [c for c in out.columns if c not in ("lattes_id", "lattes_status")]
     masked = out.with_columns(pl.col(text_cols).map_elements(mask_documents, return_dtype=pl.String))
     changed = sum((masked[c] != out[c]).fill_null(False).sum() for c in text_cols)
-    print(f"{changed} células com documento pessoal mascarado")
+    print(f"{changed} cells with a personal document masked")
     out = masked
     assert CPF_COLUMN not in out.columns
 
-    args.saida.parent.mkdir(parents=True, exist_ok=True)
-    if args.saida.suffix == ".parquet":
-        out.write_parquet(args.saida, compression="zstd", compression_level=19)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.output.suffix == ".parquet":
+        out.write_parquet(args.output, compression="zstd", compression_level=19)
     else:
-        out.write_csv(args.saida)
-    print(f"{out.height} linhas -> {args.saida}")
+        out.write_csv(args.output)
+    print(f"{out.height} rows -> {args.output}")
     print(out["lattes_status"].value_counts().sort("count", descending=True))
 
 

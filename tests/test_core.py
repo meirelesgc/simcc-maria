@@ -1,74 +1,153 @@
+from datetime import date
+
 import polars as pl
 
-from simcc_maria.evaluate import groups, names, norm, scalar
-from simcc_maria.ingest import UF_SIGLA, read_processed
-from simcc_maria.pipeline import Answer, Plano, unverified_numbers
+from simcc_maria.agent import Answer, _bind_embeddings, unverified_numbers
+from simcc_maria.evaluate import has_groups, has_numbers, norm, says_unavailable
+from simcc_maria.ingest import build
+from simcc_maria.resolve_lattes import cpf_valid, mask_documents
 
 
-def answer(df: pl.DataFrame, tipo="agregacao") -> Answer:
-    return Answer(question="", plano=Plano(tipo=tipo, sql="select 1", premissas="", ressalvas=[]), df=df)
+def scholarship(lattes, title="Projeto A", start="2015-08-01", planned_end="2016-07-31",
+                modality="undergraduate_research", inst="UFBA", status="found", **extra):
+    row = {
+        "lattes_id": lattes, "lattes_status": status, "title": title, "abstract": "Resumo do projeto",
+        "keyword_1": "dengue", "keyword_2": None, "keyword_3": None, "keyword_4": None,
+        "start_date": date.fromisoformat(start), "end_date": date.fromisoformat(planned_end),
+        "planned_end_date": date.fromisoformat(planned_end),
+        "institution": "Universidade", "institution_zip": None, "unit": None, "unit_zip": None,
+        "department": None, "department_zip": None, "institution_acronym": inst,
+        "modality": modality, "modality_label": "Iniciação Científica - Cotas",
+        "course": None, "major_area": "Ciências da Saúde", "area": "Medicina",
+        "title_norm": title.lower(), "abstract_norm": "resumo do projeto",
+    }
+    row.update(extra)
+    return row
 
 
-# --- CSV processado -----------------------------------------------------------
-
-def test_csv_preserva_id_lattes_e_tipos():
-    df = read_processed()
-    assert df.height == 17945
-    assert df["id_lattes"].str.len_chars().unique().to_list() == [16]
-    assert df["id_lattes"].str.starts_with("0").any()  # zeros à esquerda preservados
-    assert df["data_inicio"].dtype == pl.Date
-    assert df["uf"].n_unique() == len(UF_SIGLA)
-    assert df["categoria_nivel"].null_count() == 1  # o "NA" da origem virou nulo
+def frame(*rows) -> pl.DataFrame:
+    return pl.DataFrame(list(rows))
 
 
-# --- conferência de números do resumo ----------------------------------------
+# --- grant model: a grant can have more than one holder ----------------------
 
-def test_numeros_conferidos_aceitam_formato_br_e_arredondamento():
-    df = pl.DataFrame({"regiao": ["Sudeste"], "bolsas": [9650], "pct": [53.78]})
-    assert unverified_numbers("O Sudeste tem 9.650 bolsas (53,8%, cerca de 54%).", df) == []
-
-
-def test_numeros_inventados_sao_sinalizados():
-    df = pl.DataFrame({"bolsas": [9650]})
-    assert unverified_numbers("São 9.650 bolsas, 12% a mais que em 2023.", df) == ["12", "2023"]
-
-
-def test_codigos_nao_sao_tratados_como_numeros():
-    assert unverified_numbers("Nível 1A na chamada 18/2024.", pl.DataFrame({"x": [1]})) == []
+def test_replacement_within_cycle_is_one_grant_with_two_holders():
+    grants, holders = build(frame(
+        scholarship("1111111111111111", start="2015-08-01"),
+        scholarship("2222222222222222", start="2016-03-01"),  # replaced student, same cycle
+    ))
+    assert grants.height == 1
+    assert grants["holder_count"][0] == 2
+    assert holders.height == 2
+    assert grants["start_date"][0] == date(2015, 8, 1)
 
 
-# --- verificadores da avaliação: precisam reprovar respostas erradas ---------
-
-def test_scalar():
-    assert scalar(636)(answer(pl.DataFrame({"n": [636]})))[0]
-    assert not scalar(636)(answer(pl.DataFrame({"n": [635]})))[0]
-
-
-def test_groups_exige_rotulo_e_valor_na_mesma_linha():
-    check = groups({("Sudeste",): 10, ("Sul",): 5})
-    assert check(answer(pl.DataFrame({"r": ["Sudeste", "Sul"], "n": [10, 5]})))[0]
-    assert not check(answer(pl.DataFrame({"r": ["Sudeste", "Sul"], "n": [5, 10]})))[0]
+def test_new_cycle_is_a_new_grant():
+    grants, _ = build(frame(
+        scholarship("1111111111111111", planned_end="2016-07-31"),
+        scholarship("1111111111111111", start="2016-08-01", planned_end="2017-07-31"),
+    ))
+    assert grants.height == 2
+    assert grants["holder_count"].to_list() == [1, 1]
 
 
-def test_groups_sigla_curta_nao_casa_por_substring():
-    check = groups({("PQ",): 3})
-    assert not check(answer(pl.DataFrame({"m": ["PQ-Sr"], "n": [3]})))[0]
+def test_exact_duplicates_collapse_and_are_counted():
+    row = scholarship("1111111111111111")
+    grants, holders = build(frame(row, row, row))
+    assert grants.height == 1 and holders.height == 1
+    assert holders["source_rows"][0] == 3
 
 
-def test_names_reprova_nome_a_mais():
-    check = names({"Helio Chacham"})
-    assert check(answer(pl.DataFrame({"nome": ["Hélio Chacham"]}), "listagem"))[0]
-    assert not check(answer(pl.DataFrame({"nome": ["Helio Chacham", "Outro"]}), "listagem"))[0]
+def test_holders_without_lattes_are_counted_individually():
+    grants, holders = build(frame(
+        scholarship(None, status="not_found", department="A"),
+        scholarship(None, status="not_found", department="B"),
+    ))
+    assert grants["holder_count"][0] == 2
+    assert holders["lattes_id"].null_count() == 2
+
+
+def test_different_modality_or_institution_are_different_grants():
+    grants, _ = build(frame(
+        scholarship("1111111111111111"),
+        scholarship("2222222222222222", modality="masters"),
+        scholarship("3333333333333333", inst="UEFS"),
+    ))
+    assert grants.height == 3
+
+
+def test_grant_id_is_stable():
+    a, _ = build(frame(scholarship("1111111111111111")))
+    b, _ = build(frame(scholarship("2222222222222222")))
+    assert a["grant_id"][0] == b["grant_id"][0]  # same project/cycle → same grant
+
+
+def test_institution_spellings_and_acronym_aliases_are_canonical():
+    from simcc_maria.ingest import canonical_institutions
+    df = pl.DataFrame({
+        "institution_acronym": ["UESB", "UESB", "UESB", "UFSB", "UFSBA"],
+        "institution": ["Universidade Estadual do Sudoeste da Bahia"] * 2
+                       + ["Universidade Estadual Sudoeste da Bahia", "UFSB nome", "Universidade Federal do Sul da Bahia"],
+    })
+    out = canonical_institutions(df)
+    assert out.filter(institution_acronym="UESB")["institution"].unique().to_list() == [
+        "Universidade Estadual do Sudoeste da Bahia"]
+    assert out["institution_acronym"].to_list().count("UFSBA") == 2
+
+
+# --- agent helpers --------------------------------------------------------------
+
+def test_bind_embeddings_keeps_casts():
+    sql = "SELECT x::text FROM f(ARRAY['a'], :theme) WHERE y <=> :theme2 > 0"
+    out = _bind_embeddings(sql, ["theme", "theme2"])
+    assert out == "SELECT x::text FROM f(ARRAY['a'], $1::vector) WHERE y <=> $2::vector > 0"
+
+
+def test_numbers_are_checked_against_all_steps():
+    dfs = [pl.DataFrame({"grants": [126]}), pl.DataFrame({"works": [9650], "pct": [53.78]})]
+    assert unverified_numbers("Foram 126 bolsas e 9.650 obras (53,8%).", dfs) == []
+    assert unverified_numbers("Foram 127 bolsas.", dfs) == ["127"]
+
+
+def test_ranks_and_list_markers_are_not_checked():
+    dfs = [pl.DataFrame({"inst": ["UFBA", "UESC"], "grants": [2332, 415]})]
+    text = "| Posição | Sigla | Bolsas |\n|---:|---|---:|\n| 1 | UFBA | 2.332 |\n| 2 | UESC | 415 |\n\n1. UFBA lidera"
+    assert unverified_numbers(text, dfs) == []
+    assert unverified_numbers("| 1 | UFBA | 999 |", dfs) == ["999"]
+
+
+def test_codes_are_not_numbers():
+    assert unverified_numbers("Nível 1A, chamada 18/2024.", [pl.DataFrame({"x": [1]})]) == []
+
+
+# --- evaluation checks must fail on wrong answers ------------------------------------
+
+def ans(text: str) -> Answer:
+    return Answer(question="", text=text)
+
+
+def test_has_numbers():
+    assert has_numbers(544)(ans("São 544 bolsas com mais de um bolsista."))[0]
+    assert not has_numbers(544)(ans("São 545 bolsas."))[0]
+    assert has_numbers(42622)(ans("Total: 42.622 bolsas."))[0]
+
+
+def test_has_groups_needs_label_and_value_on_the_same_line():
+    check = has_groups({("UFBA",): 10, ("UEFS",): 5})
+    assert check(ans("| UFBA | 10 |\n| UEFS | 5 |"))[0]
+    assert not check(ans("| UFBA | 5 |\n| UEFS | 10 |"))[0]
+
+
+def test_says_unavailable():
+    assert says_unavailable()(ans("A base não contém valores em reais."))[0]
+    assert not says_unavailable()(ans("O valor foi R$ 10."))[0]
 
 
 def test_norm():
     assert norm("  São   Paulo ") == "sao paulo"
 
 
-# --- máscara de documentos (CPFs de exemplo, não pertencem a ninguém) --------
-
-from simcc_maria.resolve_lattes import cpf_valid, mask_documents  # noqa: E402
-
+# --- document masking (example CPFs, they belong to no one) --------------------
 
 def test_cpf_valid():
     assert cpf_valid("52998224725")
@@ -76,12 +155,12 @@ def test_cpf_valid():
     assert not cpf_valid("11111111111")
 
 
-def test_mascara_cpf_rotulado_formatado_e_rg():
+def test_masks_labeled_formatted_cpf_and_rg():
     assert mask_documents("Rg. 123456789, CPF. 529.982.247-25") == "[RG removido], CPF. [CPF removido]"
-    assert mask_documents("CPF 111.222.333-44") == "CPF [CPF removido]"  # rotulado: mesmo inválido
-    assert mask_documents("código 52998224725") == "código [CPF removido]"  # sem rótulo, DV válido
+    assert mask_documents("CPF 111.222.333-44") == "CPF [CPF removido]"
+    assert mask_documents("código 52998224725") == "código [CPF removido]"
 
 
-def test_mascara_preserva_codigos_que_nao_sao_cpf():
+def test_masking_keeps_codes_that_are_not_cpf():
     for text in ("PROSPERO: CRD42020123456", "CAAE 12345678.9.0000.5526", "123.456.789-00", "RGB 2020"):
         assert mask_documents(text) == text

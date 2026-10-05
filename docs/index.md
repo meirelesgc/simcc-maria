@@ -1,41 +1,43 @@
 # SIMCC Maria
 
-Chatbot para fazer perguntas em linguagem natural sobre dados de fomento à
-pesquisa e receber de volta uma **listagem** ou uma **agregação com resumo**.
+Chatbot no terminal para perguntas em linguagem natural sobre **bolsas por
+cotas** (IC, mestrado e doutorado) e a **produção científica** associada a
+elas no SIMCC.
 
-!!! info "Status: MVP v1 no terminal"
-    O chat sobre a planilha funciona (`poetry run maria`) e acerta 16/16 das
-    perguntas de avaliação. Veja [como usar](chatbot/uso.md) e a
-    [arquitetura](chatbot/arquitetura.md). A integração com o SIMCC é a fase 2.
+!!! info "Pergunta-guia"
+    *As bolsas contemplam pesquisas na temática Dengue? Se sim, qual o resultado
+    desse fomento? Ele gerou artigos? livros? capítulos? de quem, quando e
+    quantos?*
 
 ## Fontes de dados
 
-| Fonte | Situação | Documentação |
+| Fonte | Conteúdo | Documentação |
 |---|---|---|
-| Planilha CNPq: bolsas PQ/DT vigentes | ✅ disponível | [Visão geral](dados/visao-geral.md) |
-| SIMCC (Postgres + pgvector) | ➕ complementar, 2,5% de sobreposição | [SIMCC](dados/simcc.md) |
+| `data/raw/scholarships.parquet` | 45.425 registros → 42.622 bolsas, 32.959 bolsistas | [Visão geral](dados/visao-geral.md) |
+| SIMCC (Postgres + pgvector) | pesquisadores, orientações, produções e embeddings | [SIMCC](dados/simcc.md) |
 
 ## Estrutura do repositório
 
 ```text
 simcc-maria/
 ├── data/
-│   ├── raw/                 # arquivos originais, nunca editados à mão
-│   │   └── raw-data.xlsx
-│   └── processed/           # gerado por `poetry run ingest`
-│       └── bolsas_pq_dt.csv
-├── docs/                    # esta documentação (MkDocs)
-├── logs/                    # auditoria: um JSONL por sessão (não versionado)
+│   ├── raw/scholarships.parquet   # bolsas com Lattes (sem CPF)
+│   ├── processed/                 # gerado por `ingest` (não versionado)
+│   └── cache/                     # caches locais (não versionado)
+├── docs/                          # esta documentação (MkDocs)
+├── logs/                          # auditoria: um JSONL por sessão (não versionado)
 ├── src/simcc_maria/
-│   ├── config.py            # configurações (pydantic-settings, lê o .env)
-│   ├── ingest.py            # xlsx → csv (polars)
-│   ├── catalog.py           # descrição das colunas e regras de negócio
-│   ├── load_db.py           # csv → maria.bolsas (Postgres)
-│   ├── db.py                # execução SQL somente leitura
-│   ├── pipeline.py          # pergunta → SQL → resultado → resumo
-│   ├── audit.py             # log JSONL
-│   ├── cli.py               # chat no terminal
-│   └── evaluate.py          # perguntas com resposta conhecida
+│   ├── config.py                  # parâmetros (pydantic-settings, lê o .env)
+│   ├── resolve_lattes.py          # CPF → Lattes (API do SIMCC)
+│   ├── ingest.py                  # registros → bolsas + bolsistas (polars)
+│   ├── embeddings.py              # embeddings OpenAI com cache no Postgres
+│   ├── load_db.py                 # schema maria: tabelas, ligações, funções
+│   ├── catalog.py                 # o que o LLM sabe do banco + regras
+│   ├── db.py                      # execução SQL somente leitura
+│   ├── agent.py                   # loop de ferramentas: pergunta → consultas → resposta
+│   ├── audit.py                   # log JSONL
+│   ├── cli.py                     # chat no terminal
+│   └── evaluate.py                # perguntas com resposta conhecida
 ├── tests/
 ├── mkdocs.yml
 └── pyproject.toml
@@ -45,8 +47,8 @@ simcc-maria/
 
 ```bash
 poetry install --with docs,dev  # dependências + documentação + testes
-poetry run ingest               # regenera data/processed/bolsas_pq_dt.csv
-poetry run load-db              # carrega o CSV em maria.bolsas
+poetry run ingest               # bolsas e bolsistas em data/processed
+poetry run load-db              # schema maria no Postgres
 poetry run maria                # chat
 poetry run evaluate             # avaliação
 poetry run pytest               # testes

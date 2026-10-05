@@ -43,8 +43,8 @@ nav:
       - Visão geral: dados/visao-geral.md
       - Dicionário de dados: dados/dicionario.md
       - Qualidade e cuidados: dados/qualidade.md
-      - Pipeline (xlsx → csv): dados/pipeline.md
-      - SIMCC (complementar): dados/simcc.md
+      - Pipeline: dados/pipeline.md
+      - SIMCC e ligações: dados/simcc.md
   - Chatbot:
       - Como usar: chatbot/uso.md
       - Arquitetura: chatbot/arquitetura.md

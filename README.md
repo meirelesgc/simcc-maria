@@ -1,11 +1,12 @@
 # SIMCC Maria
 
-Chatbot no terminal para perguntas em linguagem natural sobre as bolsas de produtividade do CNPq (PQ/DT).
+Chatbot no terminal para perguntas em linguagem natural sobre bolsas por cotas
+(IC, mestrado e doutorado) e a produção científica associada a elas no SIMCC.
 
 ```bash
 poetry install --with docs,dev
-poetry run ingest       # data/raw/raw-data.xlsx -> data/processed/bolsas_pq_dt.csv
-poetry run load-db      # CSV -> maria.bolsas (Postgres)
+poetry run ingest       # data/raw/scholarships.parquet -> grants + grant_holders (data/processed)
+poetry run load-db      # schema maria no Postgres: tabelas, embeddings, ligações, funções
 poetry run maria        # chat
 poetry run evaluate     # avaliação com respostas conhecidas
 poetry run pytest       # testes
@@ -18,22 +19,24 @@ Requer `.env` com `DATABASE_URL` e `OPENAI_API_KEY`.
 
 | Arquivo | Conteúdo |
 |---|---|
-| `data/raw/raw-data.xlsx` | Bolsas PQ/DT do CNPq vigentes em 08/09/2026 (17.945 linhas) |
-| `data/raw/bolsas_projetos.parquet` | Projetos de pesquisa com o Lattes ID do pesquisador (45.425 linhas) |
+| `data/raw/scholarships.parquet` | 45.425 registros de bolsistas com Lattes ID → 42.622 bolsas, 32.959 pessoas |
+
+Uma bolsa pode ter mais de um bolsista (544 bolsas). Veja `docs/dados/visao-geral.md`.
 
 ## Relatório: conversão CPF → Lattes ID (05/10/2026)
 
-A planilha de projetos chegou com o **CPF** do pesquisador. O CPF foi trocado
+A planilha de projetos chegou com o **CPF** do bolsista. O CPF foi trocado
 pelo Lattes ID por meio da API do SIMCC (`/v3/api/getIdentificadorCNPq`), e a
-planilha original foi apagada.
+planilha original foi apagada. O resultado hoje é `data/raw/scholarships.parquet`,
+com as colunas e os status já traduzidos para o padrão do repositório.
 
 ### Resultado
 
 | `lattes_status` | Linhas | CPFs distintos | Significado |
 |---|---:|---:|---|
-| `ok` | 45.317 (99,8%) | 32.856 | Lattes encontrado |
-| `nao_encontrado` | 105 | 91 | a API respondeu `500 Error processing CNPq request` em duas rodadas |
-| `documento_estrangeiro` | 3 | 2 | passaporte em vez de CPF; não consultado |
+| `found` | 45.317 (99,8%) | 32.856 | Lattes encontrado |
+| `not_found` | 105 | 91 | a API respondeu `500 Error processing CNPq request` em duas rodadas |
+| `foreign_document` | 3 | 2 | passaporte em vez de CPF; não consultado |
 | **Total** | **45.425** | **32.949** | |
 
 - **Requisições:** 32.947, uma por CPF distinto, em vez de 45.425 (uma por
@@ -66,8 +69,52 @@ planilha original foi apagada.
 - **Uma planilha nova com CPFs precisa passar pelo mesmo processo:**
 
   ```bash
-  poetry run resolve-lattes ENTRADA.xlsx data/raw/SAIDA.parquet
+  poetry run resolve-lattes ENTRADA.xlsx data/raw/scholarships.parquet
   ```
 
   Em seguida, apague a entrada e o diretório `data/cache/`. Detalhes em
   `docs/dados/pipeline.md`.
+
+## Melhorias futuras
+
+### Embeddings nas views materializadas do SIMCC
+
+**Pergunta:** vale colocar os embeddings nas views materializadas (`mv_search_*`,
+`mv_canonical_*`) no lugar de `search_document_researcher` e
+`search_document_production`?
+
+**É possível, mas não diretamente.** Uma view materializada é o resultado de
+uma consulta SQL, e o embedding vem de uma API externa (OpenAI). O `REFRESH`
+não consegue gerá-lo. O que dá para fazer é **juntar** na view embeddings já
+guardados numa tabela.
+
+O desenho recomendado, o mesmo que o `maria` usa em `maria.embedding_cache`:
+
+1. **Uma tabela de embeddings indexada pelo hash do texto** (`sha256(modelo +
+   texto)`). Um job gera apenas os hashes que ainda não existem, antes do
+   `REFRESH`.
+2. **A view materializada guarda só a chave** (o hash do texto que ela
+   monta), não o vetor. A busca faz `JOIN` com a tabela de embeddings.
+3. **O índice HNSW fica na tabela de embeddings,** que é estável, e não na
+   view.
+
+Por que não guardar o vetor dentro da view:
+
+- **Cada `REFRESH` reescreveria todos os vetores** (`search_document_production`
+  já ocupa 1,1 GB) e **reconstruiria o índice HNSW** do zero. Neste banco isso
+  leva de 6 a 20 minutos.
+- **Não há atualização incremental:** um texto alterado obriga a recalcular a
+  view inteira.
+
+Ganhos adicionais observados no dump:
+
+- **Embeddings por obra canônica.** Hoje há um vetor por cópia da produção (uma
+  por coautor). Usando as `mv_canonical_*` (que já deduplicam), seriam menos
+  vetores, e a deduplicação ficaria alinhada com a contagem de obras.
+- **Índice vetorial.** `search_document_production` não tem índice HNSW/IVFFlat,
+  então toda busca semântica percorre a tabela inteira.
+- **Busca híbrida nativa.** As views já têm `tsvector` com índice GIN. Combinar
+  `ts_rank` com o cosseno daria uma busca híbrida melhor que o `LIKE` usado
+  hoje em `maria.search_*`.
+- **`maria.productions` poderia usar as `mv_canonical_*`** em vez da `work_key`
+  própria (DOI ou título + ano).

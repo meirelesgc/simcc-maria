@@ -1,34 +1,38 @@
-"""Avaliação: perguntas com resposta conhecida, calculada em polars a partir do CSV.
+"""Evaluation: questions with known answers.
 
-Uso:
-    poetry run evaluate                 # 1 rodada
-    poetry run evaluate --runs 3        # mede consistência (mesma pergunta, 3 vezes)
-    poetry run evaluate -k nivel        # só casos cujo id contém "nivel"
-    LLM_MODEL_SUMMARY=openai:gpt-5.4-mini poetry run evaluate   # compara modelos
+Expected values come from polars over data/processed (grant/holder counts) or
+from a hand-written reference SQL (theme outcomes, with the terms pinned in the
+question). Checks look for the numbers in the FINAL ANSWER TEXT, which is what
+the user reads.
+
+Usage:
+    poetry run evaluate               # 1 run
+    poetry run evaluate --runs 3      # consistency
+    poetry run evaluate -k dengue     # only cases whose id contains "dengue"
 """
 
 import argparse
 import asyncio
+import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import asyncpg
 import polars as pl
 from rich import box
 from rich.console import Console
 from rich.table import Table
 
+from simcc_maria.agent import Agent, Answer, _parse_br
 from simcc_maria.audit import AuditLog
 from simcc_maria.config import ROOT, get_settings
 from simcc_maria.db import Database
-from simcc_maria.ingest import read_processed
-from simcc_maria.pipeline import Answer, Pipeline
+from simcc_maria.embeddings import Embedder
+from simcc_maria.ingest import read_grants
 
 console = Console()
-D = read_processed()
-
-PESSOAS = pl.col("id_lattes").n_unique()
-BOLSAS = pl.col("qtd_bolsa").sum()
+NUMBER = re.compile(r"(?<![\w/])(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?(?![\w/])")
 
 
 def norm(text) -> str:
@@ -36,48 +40,33 @@ def norm(text) -> str:
     return " ".join(text.lower().split())
 
 
-# --- verificações -------------------------------------------------------------
+def numbers(text: str) -> set[float]:
+    return {_parse_br(t) for t in NUMBER.findall(text)}
+
+
+# --- checks over the answer text -----------------------------------------------
 
 Check = Callable[[Answer], tuple[bool, str]]
 
 
-def _numbers(row) -> set[float]:
-    out = set()
-    for v in row:
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            out.add(float(v))
-        else:
-            try:
-                out.add(float(v))
-            except (TypeError, ValueError):
-                pass
-    return out
-
-
-def scalar(expected: int | float) -> Check:
+def has_numbers(*expected: int | float) -> Check:
     def check(ans: Answer) -> tuple[bool, str]:
-        if ans.df is None or ans.df.is_empty():
-            return False, "sem resultado"
-        found = set().union(*(_numbers(r) for r in ans.df.iter_rows()))
-        return float(expected) in found, f"esperado {expected}"
+        found = numbers(ans.text)
+        missing = [e for e in expected if float(e) not in found]
+        return not missing, f"faltou {missing}" if missing else f"citou {list(expected)}"
     return check
 
 
-def groups(expected: dict[tuple[str, ...], int | float]) -> Check:
-    """Cada grupo (com apelidos aceitos) precisa aparecer com o valor esperado."""
-    def label_match(cell, aliases) -> bool:
-        c = norm(cell)
-        return any(c == norm(a) or (len(a) > 3 and norm(a) in c) for a in aliases)
-
+def has_groups(expected: dict[tuple[str, ...], int | float]) -> Check:
+    """Each group label (any alias) must share a line of the answer with its value."""
     def check(ans: Answer) -> tuple[bool, str]:
-        if ans.df is None or ans.df.is_empty():
-            return False, "sem resultado"
+        lines = [norm(line) for line in ans.text.splitlines()]
+        raw = ans.text.splitlines()
         missing = []
         for aliases, value in expected.items():
             ok = any(
-                any(label_match(v, aliases) for v in row if isinstance(v, str))
-                and float(value) in _numbers(row)
-                for row in ans.df.iter_rows()
+                any(norm(a) in line for a in aliases) and float(value) in numbers(raw[i])
+                for i, line in enumerate(lines)
             )
             if not ok:
                 missing.append(f"{aliases[0]}={value}")
@@ -85,108 +74,137 @@ def groups(expected: dict[tuple[str, ...], int | float]) -> Check:
     return check
 
 
-def names(expected: set[str]) -> Check:
+def says_unavailable() -> Check:
+    phrases = ["nao ha", "nao contem", "nao possui", "nao esta disponivel", "nao e possivel",
+               "nao existe", "nao temos", "nao consta", "nao estao disponiveis", "indisponivel"]
+
     def check(ans: Answer) -> tuple[bool, str]:
-        if ans.df is None or ans.df.is_empty():
-            return False, "sem resultado"
-        want = {norm(n) for n in expected}
-        best = max(
-            ({norm(v) for v in ans.df[c].to_list()} for c in ans.df.columns),
-            key=lambda got: len(got & want),
-        )
-        extra, miss = best - want, want - best
-        return not extra and not miss, f"{len(want)} esperados · +{len(extra)} a mais · -{len(miss)} faltando"
+        t = norm(ans.text)
+        return any(p in t for p in phrases), "declarou indisponível" if any(p in t for p in phrases) else "não declarou"
     return check
 
 
-def out_of_scope() -> Check:
+def all_of(*checks: Check) -> Check:
     def check(ans: Answer) -> tuple[bool, str]:
-        tipo = ans.plano.tipo if ans.plano else None
-        return tipo == "fora_do_escopo", f"tipo={tipo}"
+        results = [c(ans) for c in checks]
+        return all(ok for ok, _ in results), " · ".join(d for _, d in results)
     return check
 
 
-# --- casos --------------------------------------------------------------------
-
-def _top(df: pl.DataFrame, by: str, n: int) -> dict[tuple[str, ...], int]:
-    top = df.group_by(by).agg(PESSOAS.alias("n")).sort(["n", by], descending=[True, False]).head(n)
-    return {(row[by],): row["n"] for row in top.iter_rows(named=True)}
-
+# --- cases ----------------------------------------------------------------------
 
 @dataclass
 class Case:
     id: str
     question: str
-    check: Check
+    check: Check | None = None
+    reference_sql: str | None = None  # expected values computed in the database
+    reference_check: Callable[[pl.DataFrame], Check] | None = None
+    reference_embed: str | None = None
 
 
-CASES = [
-    Case("bolsas_por_regiao", "Quantas bolsas existem por região?",
-         groups({(r,): v for r, v in D.group_by("regiao").agg(BOLSAS).iter_rows()})),
-    Case("pessoas_pq", "Quantos pesquisadores têm bolsa PQ?",
-         scalar(D.filter(pl.col("modalidade_cod") == "PQ").select(PESSOAS).item())),
-    Case("dt_bahia", "Quantas bolsas DT existem na Bahia?",
-         scalar(D.filter(modalidade_cod="DT", uf="BA").select(BOLSAS).item())),
-    Case("top5_nordeste", "Quais as 5 instituições do Nordeste com mais bolsistas?",
-         groups(_top(D.filter(regiao="Nordeste"), "instituicao", 5))),
-    Case("nivel_1a", "Quantos bolsistas nível 1A existem?",
-         scalar(D.filter(categoria_nivel="1A").select(PESSOAS).item())),
-    Case("termino_2027_rs", "Quantas bolsas terminam em 2027 no Rio Grande do Sul?",
-         scalar(D.filter(pl.col("data_termino").dt.year() == 2027, uf="RS").select(BOLSAS).item())),
-    Case("lista_fisica_ufmg", "Liste os bolsistas PQ nível A de Física da UFMG",
-         names(set(D.filter(modalidade_cod="PQ", categoria_nivel="A", area="Física")
-                   .filter(pl.col("instituicao").str.ends_with(" UFMG"))["nome_beneficiario"]))),
-    Case("computacao_sp", "Quantos bolsistas de Ciência da Computação existem no estado de São Paulo?",
-         scalar(D.filter(area="Ciência da Computação", uf="SP").select(PESSOAS).item())),
-    Case("bolsas_por_modalidade", "Quantas bolsas existem por modalidade?",
-         groups({
-             ("PQ", "Produtividade em Pesquisa"): D.filter(modalidade_cod="PQ").select(BOLSAS).item(),
-             ("DT", "Produtividade Desen"): D.filter(modalidade_cod="DT").select(BOLSAS).item(),
-         })),
-    Case("cidade_top_sc", "Qual a cidade com mais bolsistas em Santa Catarina?",
-         groups(_top(D.filter(uf="SC"), "cidade", 1))),
-    Case("acento_florianopolis", "Quantos bolsistas existem em Florianópolis?",
-         scalar(D.filter(cidade="Florianopolis").select(PESSOAS).item())),
-    Case("inicio_2025", "Quantas bolsas começaram em 2025?",
-         scalar(D.filter(pl.col("data_inicio").dt.year() == 2025).select(BOLSAS).item())),
-    Case("senior_usp", "Quantos pesquisadores da USP têm bolsa sênior?",
-         scalar(D.filter(categoria_nivel="SR").filter(pl.col("instituicao").str.ends_with(" USP"))
-                .select(PESSOAS).item())),
-    Case("nivel_escala_nova", "Quantas bolsas existem em cada nível da escala nova?",
-         groups({(n,): D.filter(categoria_nivel=n).select(BOLSAS).item() for n in ("A", "B", "C")})),
-    Case("fora_valor", "Qual o valor total pago em bolsas no Paraná?", out_of_scope()),
-    Case("fora_genero", "Quantas mulheres têm bolsa PQ?", out_of_scope()),
-]
+def build_cases() -> list[Case]:
+    grants, holders = read_grants()
+    people = holders["lattes_id"].n_unique() - (1 if holders["lattes_id"].null_count() else 0) \
+        + holders["lattes_id"].null_count()
+    # "masters" is left out: "Mestrado" is also a substring of "Mestrado Profissional"
+    labels = {
+        "undergraduate_research": ("Iniciação Científica", "undergraduate_research"),
+        "professional_masters": ("Mestrado Profissional", "professional_masters"),
+        "doctorate": ("Doutorado", "doctorate"),
+    }
+    by_mod = grants.group_by("modality").agg(pl.len().alias("n"))
+    top_phd = (grants.filter(modality="doctorate").group_by("institution_acronym").len()
+               .sort(["len", "institution_acronym"], descending=[True, False]).head(5))
+    three = grants.filter(pl.col("holder_count") == 3).sort("grant_id")["title"][0]
+    lexical_dengue = grants.filter(
+        pl.concat_str([pl.col("title"), pl.col("abstract"), pl.col("keywords").list.join(" ")],
+                      separator=" ", ignore_nulls=True)
+        .map_elements(norm, return_dtype=pl.String).str.contains(r"(^|[^a-z0-9])dengue")
+    ).height
+
+    return [
+        Case("grants_by_modality", "Quantas bolsas existem por modalidade?",
+             has_groups({labels[m]: n for m, n in by_mod.iter_rows() if m in labels})),
+        Case("grants_and_people", "Quantas bolsas existem no total e quantas pessoas distintas foram bolsistas?",
+             has_numbers(grants.height, people)),
+        Case("multi_holder", "Quantas bolsas tiveram mais de um bolsista?",
+             has_numbers(grants.filter(pl.col("holder_count") > 1).height)),
+        Case("max_holders", "Qual o maior número de bolsistas numa mesma bolsa, e quantas bolsas têm esse número?",
+             has_numbers(3, grants.filter(pl.col("holder_count") == 3).height)),
+        Case("holders_of_grant", f"Quantos bolsistas teve a bolsa com o título \"{three}\"?",
+             has_numbers(3)),
+        Case("top5_doctorate", "Quais as 5 instituições com mais bolsas de doutorado? Diga quantas bolsas cada uma tem.",
+             has_groups({(acr,): n for acr, n in top_phd.iter_rows()})),
+        Case("start_2020", "Quantas bolsas começaram em 2020?",
+             has_numbers(grants.filter(pl.col("start_date").dt.year() == 2020).height)),
+        Case("dengue_lexical", "Quantas bolsas mencionam literalmente a palavra dengue no título, "
+                               "no resumo ou nas palavras-chave? Use só busca por palavra, sem semântica.",
+             has_numbers(lexical_dengue)),
+        Case("dengue_outcomes_pinned",
+             "Considerando a busca temática com o termo 'dengue' e o embedding do texto 'dengue', "
+             "quantos artigos, livros e capítulos de livro distintos estão associados às bolsas desse tema?",
+             reference_embed="dengue",
+             reference_sql="""
+                SELECT production_type, count(DISTINCT work_key) AS works
+                FROM maria.grant_outcomes(ARRAY['dengue'], $1::vector)
+                GROUP BY 1""",
+             reference_check=lambda df: has_groups({
+                 {"ARTICLE": ("artigo", "article"), "BOOK": ("livro", "book"),
+                  "BOOK_CHAPTER": ("capitulo", "chapter")}[t]: n
+                 for t, n in df.iter_rows()
+                 # "livro" also matches "capítulo de livro": check chapters/articles only
+                 if t != "BOOK"
+             })),
+        Case("dengue_question",
+             "As bolsas contemplam pesquisas na temática Dengue? Se sim, qual o resultado desse fomento? "
+             "Ele gerou artigos? livros? capítulos? de quem, quando e quantos"),
+        Case("out_of_scope", "Qual foi o valor total, em reais, pago nas bolsas de doutorado?", says_unavailable()),
+    ]
 
 
-# --- execução -----------------------------------------------------------------
+# --- run --------------------------------------------------------------------------
 
 async def run(runs: int, only: str | None) -> None:
-    settings = get_settings()
-    cases = [c for c in CASES if not only or only in c.id]
+    s = get_settings()
+    cases = [c for c in build_cases() if not only or only in c.id]
     audit = AuditLog("eval")
     db = await Database.connect()
-    pipeline = await Pipeline.create(db, audit)
+    write_pool = await asyncpg.create_pool(s.asyncpg_dsn, min_size=1, max_size=2, init=Embedder.init_connection)
+    embedder = Embedder(write_pool)
+    agent = await Agent.create(db, embedder, audit)
+
+    for case in cases:  # reference values from the database
+        if case.reference_sql:
+            vec = await embedder.embed_one(case.reference_embed)
+            ref = (await db.run(case.reference_sql, (vec,))).df
+            case.check = case.reference_check(ref)
+            audit.write("eval_reference", case=case.id, reference=ref.to_dicts())
 
     results = []
     try:
         for case in cases:
             for i in range(runs):
-                pipeline.reset()  # cada caso é independente
+                agent.reset()
                 with console.status(f"{case.id} ({i + 1}/{runs})"):
                     try:
-                        ans = await pipeline.ask(case.question)
-                        ok, detail = case.check(ans) if not ans.error else (False, ans.error)
+                        ans = await agent.ask(case.question)
+                        if case.check:
+                            ok, detail = case.check(ans)
+                        else:  # open question: judged by a person; here only sanity
+                            ok = bool(ans.text) and not ans.hit_step_limit and not ans.unverified_numbers
+                            detail = "revisão manual (sem erro, sem números não conferidos)"
                     except Exception as exc:
                         ans, ok, detail = None, False, f"{type(exc).__name__}: {exc}"
                 audit.write("eval_case", case=case.id, run=i + 1, ok=ok, detail=detail)
                 results.append((case, i, ok, detail, ans))
     finally:
         await db.close()
+        await write_pool.close()
 
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan")
-    for col in ("caso", "ok", "detalhe", "aviso", "tokens", "s"):
-        table.add_column(col, justify="right" if col in ("tokens", "s") else "left")
+    for col in ("caso", "ok", "detalhe", "aviso", "passos", "tokens", "s"):
+        table.add_column(col, justify="right" if col in ("passos", "tokens", "s") else "left")
     for case, i, ok, detail, ans in results:
         warn = ", ".join(ans.unverified_numbers) if ans and ans.unverified_numbers else ""
         table.add_row(
@@ -194,24 +212,22 @@ async def run(runs: int, only: str | None) -> None:
             "[green]✔[/green]" if ok else "[red]✘[/red]",
             detail,
             f"[yellow]{warn}[/yellow]",
-            str(ans.usage.tokens_in + ans.usage.tokens_out) if ans else "",
-            f"{ans.ms / 1000:.1f}" if ans else "",
+            str(len(ans.steps)) if ans else "",
+            str(ans.usage.total) if ans else "",
+            f"{ans.ms / 1000:.0f}" if ans else "",
         )
     console.print(table)
-
     passed = sum(ok for _, _, ok, _, _ in results)
-    tokens = sum(a.usage.tokens_in + a.usage.tokens_out for *_, a in results if a)
-    console.print(
-        f"[bold]{passed}/{len(results)} corretas[/bold] ({passed / len(results):.0%}) · "
-        f"{tokens:,} tokens · SQL: {settings.llm_model_sql} · resumo: {settings.summary_model}"
-    )
+    tokens = sum(a.usage.total for *_, a in results if a)
+    console.print(f"[bold]{passed}/{len(results)} corretas[/bold] ({passed / len(results):.0%}) · "
+                  f"{tokens:,} tokens · {s.llm_model}")
     console.print(f"[dim]log: {audit.path.relative_to(ROOT)}[/dim]")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--runs", type=int, default=1, help="repetições por caso")
-    parser.add_argument("-k", dest="only", help="filtra casos pelo id")
+    parser.add_argument("--runs", type=int, default=1, help="runs per case")
+    parser.add_argument("-k", dest="only", help="filter cases by id")
     args = parser.parse_args()
     asyncio.run(run(args.runs, args.only))
 

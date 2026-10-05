@@ -1,6 +1,6 @@
-"""Log de auditoria: um arquivo JSONL por sessão em logs/.
+"""Audit log: one JSONL file per session in logs/.
 
-Cada linha é um evento com ts, session, turn e event. Para analisar:
+Each line is an event with ts, session, turn and event. To analyze:
     SELECT * FROM read_json('logs/*.jsonl')        -- DuckDB
     pl.read_ndjson('logs/*.jsonl')                 -- polars
 """
@@ -69,14 +69,14 @@ class AuditLog:
 
     def start(self, system_prompt: str, **extra) -> None:
         settings = get_settings()
+        params = settings.model_dump(
+            exclude={"database_url", "openai_api_key", "raw_scholarships", "processed_dir", "cache_dir", "logs_dir"}
+        )
         self.write(
             "session_start",
-            sql_model=settings.llm_model_sql,
-            summary_model=settings.summary_model,
-            sql_reasoning=settings.llm_reasoning_sql,
-            summary_reasoning=settings.llm_reasoning_summary,
+            settings=params,
             prompt_sha=sha256_text(system_prompt),
-            csv_sha=sha256_file(settings.processed_csv),
+            data_sha=sha256_file(settings.raw_scholarships),
             git_commit=git_commit(),
             system_prompt=system_prompt,
             **extra,

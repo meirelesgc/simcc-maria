@@ -1,9 +1,10 @@
-"""Chat no terminal: poetry run maria"""
+"""Terminal chat: poetry run maria"""
 
 import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 
+import asyncpg
 import polars as pl
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -16,40 +17,41 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from simcc_maria.agent import Agent, Answer, Step
 from simcc_maria.audit import AuditLog
-from simcc_maria.catalog import COLUMNS, TABLE
+from simcc_maria.catalog import SCHEMA_DOC
 from simcc_maria.config import ROOT, get_settings
 from simcc_maria.db import Database
-from simcc_maria.pipeline import Answer, Pipeline
+from simcc_maria.embeddings import Embedder
 
-DISPLAY_ROWS = 20
-BAR_WIDTH = 28
+STEP_ROWS = 8
+BAR_WIDTH = 24
 
 COMMANDS = {
     "/ajuda": "mostra esta ajuda",
     "/exemplos": "perguntas sugeridas",
-    "/schema": "colunas da tabela",
-    "/sql": "liga/desliga a exibição do SQL",
-    "/csv": "exporta o último resultado completo",
+    "/schema": "tabelas e funções disponíveis",
+    "/sql": "liga/desliga o SQL de cada passo",
+    "/csv": "exporta os resultados de todos os passos da última resposta",
     "/log": "caminho do log de auditoria da sessão",
     "/limpar": "esquece o contexto da conversa",
     "/sair": "encerra",
 }
 
 EXAMPLES = [
-    "Quantas bolsas existem por região?",
-    "Quais as 10 instituições do Nordeste com mais bolsistas?",
-    "Liste os bolsistas PQ nível A de Física da UFMG",
-    "Quantas bolsas DT existem por programa de fomento?",
-    "Quantas bolsas terminam em 2027 no Rio Grande do Sul?",
-    "Distribuição de níveis em Ciência da Computação",
-    "Qual a cidade com mais bolsistas em Santa Catarina?",
+    "As bolsas contemplam pesquisas na temática Dengue? Se sim, qual o resultado desse fomento? "
+    "Ele gerou artigos? livros? capítulos? de quem, quando e quantos",
+    "Quantas bolsas e quantos bolsistas existem por modalidade?",
+    "Quantas bolsas tiveram mais de um bolsista? Mostre exemplos",
+    "Quais as 10 instituições com mais bolsas de doutorado?",
+    "Existem bolsas sobre inteligência artificial? Quantas por ano?",
+    "Quais orientadores aparecem ligados a mais bolsas sobre Zika?",
 ]
 
 console = Console()
 
 
-# --- formatação ---------------------------------------------------------------
+# --- formatting ---------------------------------------------------------------
 
 def fmt(value) -> str:
     if value is None:
@@ -64,48 +66,35 @@ def fmt(value) -> str:
         return value.strftime("%d/%m/%Y %H:%M")
     if isinstance(value, date):
         return value.strftime("%d/%m/%Y")
+    if isinstance(value, list):
+        return "; ".join(map(str, value))
     return str(value)
 
 
 def _bar_column(df: pl.DataFrame) -> str | None:
-    """Coluna numérica a desenhar como barra: a primeira, se não houver negativos."""
-    for name, dtype in df.schema.items():
-        if dtype.is_numeric():
-            col = df[name].drop_nulls()
-            if col.len() and col.min() >= 0 and col.max() > 0:
-                return name
+    """Numeric column drawn as bars: the last one, if non-negative and not an id/year."""
+    numeric = [n for n, t in df.schema.items() if t.is_numeric() and "year" not in n and "ano" not in n]
+    for name in reversed(numeric):
+        col = df[name].drop_nulls()
+        if col.len() and col.min() >= 0 and col.max() > 0:
+            return name
     return None
 
 
-def render_table(ans: Answer) -> Table | Text:
-    df = ans.df
+def render_df(df: pl.DataFrame, truncated: bool, max_rows: int) -> Table | Text:
     if df.is_empty():
-        return Text("nenhuma linha encontrada", style="yellow")
-
-    # Em listagens, colunas com o mesmo valor em todas as linhas (os filtros)
-    # viram uma legenda em vez de ocupar largura repetindo o valor.
-    constant: dict[str, str] = {}
-    if ans.plano.tipo == "listagem" and df.height > 1 and df.width > 2:
-        for name in df.columns:
-            if df[name].n_unique() == 1 and len(constant) < df.width - 2:
-                constant[name] = fmt(df[name][0])
-        df = df.drop(list(constant))
-
-    show = df.head(DISPLAY_ROWS)
-    bar = _bar_column(df) if ans.plano.tipo == "agregacao" and 1 < df.height <= DISPLAY_ROWS else None
+        return Text("nenhuma linha", style="yellow")
+    show = df.head(max_rows)
+    text_cols = [n for n, t in df.schema.items() if not t.is_numeric()]
+    bar = _bar_column(df) if 1 < df.height <= 20 and len(text_cols) >= 1 else None
 
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", pad_edge=False)
     for name, dtype in show.schema.items():
-        table.add_column(
-            name,
-            justify="right" if dtype.is_numeric() else "left",
-            overflow="fold",
-            min_width=min(len(name), 24),
-        )
+        table.add_column(name, justify="right" if dtype.is_numeric() else "left",
+                         overflow="fold", min_width=min(len(name), 16), max_width=60)
     if bar:
         table.add_column("", no_wrap=True)
         top = float(df[bar].max())
-
     for row in show.iter_rows(named=True):
         cells = [fmt(v) for v in row.values()]
         if bar:
@@ -113,52 +102,41 @@ def render_table(ans: Answer) -> Table | Text:
             cells.append("█" * max(1, round(float(v) / top * BAR_WIDTH)) if v else "")
         table.add_row(*cells)
 
-    notes = []
-    if constant:
-        notes.append(" · ".join(f"{k} = {v}" for k, v in constant.items()))
     hidden = df.height - show.height
-    if hidden > 0 or ans.truncated:
-        more = f"+{fmt(hidden)}" + ("+" if ans.truncated else "")
-        notes.append(f"… {more} linhas · /csv para exportar")
-    if notes:
-        table.caption = "\n".join(notes)
+    if hidden > 0 or truncated:
+        table.caption = f"… +{fmt(hidden)}{'+' if truncated else ''} linhas · /csv para exportar"
     return table
 
 
-def render_answer(ans: Answer, show_sql: bool) -> None:
-    settings = get_settings()
-    if ans.plano is None or ans.error:
-        console.print(Panel(ans.error or "sem resposta", title="erro", border_style="red"))
-        return
+def render_step(step: Step, show_sql: bool) -> None:
+    parts = []
+    if show_sql:
+        parts.append(Syntax(step.sql.strip(), "sql", theme="ansi_dark", word_wrap=True))
+        for name, text in step.embed.items():
+            parts.append(Text(f":{name} = embedding(\"{text}\")", style="magenta"))
+    if step.error:
+        parts.append(Text(step.error, style="red"))
+        subtitle = "erro"
+    else:
+        parts.append(render_df(step.df, step.truncated, STEP_ROWS))
+        subtitle = f"{fmt(step.df.height)} linhas · {step.ms} ms"
+    console.print(Panel(
+        Group(*parts), title=f"passo {step.n} · {step.purpose}", title_align="left",
+        subtitle=subtitle, subtitle_align="right", border_style="red" if step.error else "dim",
+    ))
 
-    p = ans.plano
-    if show_sql and p.sql:
-        title = f"SQL · {p.tipo}"
-        subtitle = f"{fmt(ans.df.height)} linhas · {ans.sql_ms} ms"
-        if ans.attempts > 1:
-            subtitle += f" · {ans.attempts} tentativas"
-        console.print(
-            Panel(
-                Group(Syntax(p.sql.strip(), "sql", theme="ansi_dark", word_wrap=True), Text(p.premissas, style="dim italic")),
-                title=title, subtitle=subtitle, title_align="left", subtitle_align="right",
-                border_style="dim",
-            )
-        )
 
-    if ans.df is not None:
-        console.print(render_table(ans))
-
-    body = [Markdown(ans.summary)]
+def render_answer(ans: Answer) -> None:
+    s = get_settings()
+    body = [Markdown(ans.text or "_sem resposta_")]
     if ans.unverified_numbers:
-        body.append(Text(
-            f"⚠ números não encontrados na tabela: {', '.join(ans.unverified_numbers)}",
-            style="yellow",
-        ))
-    models = settings.llm_model_sql.split(":")[-1]
-    if settings.summary_model != settings.llm_model_sql:
-        models += " / " + settings.summary_model.split(":")[-1]
-    footer = f"{fmt(ans.usage.tokens_in + ans.usage.tokens_out)} tokens · {ans.ms / 1000:.1f}s · {models}"
-    console.print(Panel(Group(*body), title="resumo", title_align="left", subtitle=footer,
+        body.append(Text(f"⚠ números não encontrados nos resultados: {', '.join(ans.unverified_numbers)}",
+                         style="yellow"))
+    if ans.hit_step_limit:
+        body.append(Text(f"⚠ limite de {s.agent_max_steps} passos atingido", style="yellow"))
+    footer = (f"{len(ans.steps)} passos · {fmt(ans.usage.total)} tokens · {ans.ms / 1000:.1f}s · "
+              f"{s.llm_model.split(':')[-1]}")
+    console.print(Panel(Group(*body), title="resposta", title_align="left", subtitle=footer,
                         subtitle_align="right", border_style="green"))
 
 
@@ -169,29 +147,22 @@ def render_help() -> None:
     console.print(t)
 
 
-def render_schema() -> None:
-    t = Table(title=TABLE, box=box.SIMPLE_HEAD, header_style="bold cyan")
-    t.add_column("coluna", style="cyan")
-    t.add_column("tipo", style="dim")
-    t.add_column("descrição")
-    for name, (pg_type, desc) in COLUMNS.items():
-        t.add_row(name, pg_type, desc)
-    console.print(t)
-
-
 # --- loop ---------------------------------------------------------------------
 
 async def chat() -> None:
-    settings = get_settings()
+    s = get_settings()
     audit = AuditLog("chat")
     with console.status("conectando ao banco e montando o contexto…"):
         db = await Database.connect()
-        pipeline = await Pipeline.create(db, audit)
+        # query embeddings are cached in maria.embedding_cache: this pool may write
+        write_pool = await asyncpg.create_pool(s.asyncpg_dsn, min_size=1, max_size=2,
+                                               init=Embedder.init_connection)
+        agent = await Agent.create(db, Embedder(write_pool), audit)
 
     console.print(Panel(
         Text.assemble(
-            ("SIMCC Maria", "bold"), " · perguntas sobre bolsas PQ/DT do CNPq vigentes em 08/09/2026\n",
-            ("modelo SQL: ", "dim"), settings.llm_model_sql, ("  ·  resumo: ", "dim"), settings.summary_model, "\n",
+            ("SIMCC Maria", "bold"), " · bolsas (IC, mestrado, doutorado) e sua produção no SIMCC\n",
+            ("modelo: ", "dim"), s.llm_model, ("  ·  até ", "dim"), str(s.agent_max_steps), (" consultas por pergunta\n", "dim"),
             ("digite ", "dim"), ("/ajuda", "cyan"), (" para comandos ou ", "dim"), ("/exemplos", "cyan"),
             (" para começar", "dim"),
         ),
@@ -227,43 +198,55 @@ async def chat() -> None:
                     for i, ex in enumerate(EXAMPLES, 1):
                         console.print(f"[dim]{i}.[/dim] {ex}")
                 elif cmd == "/schema":
-                    render_schema()
+                    console.print(Markdown(SCHEMA_DOC.format(years_after=s.outcome_years_after)))
                 elif cmd == "/sql":
                     show_sql = not show_sql
                     console.print(f"SQL {'visível' if show_sql else 'oculto'}", style="dim")
                 elif cmd == "/csv":
-                    if last is None or last.df is None:
+                    steps = [st for st in (last.steps if last else []) if st.df is not None]
+                    if not steps:
                         console.print("nenhum resultado para exportar", style="yellow")
-                    else:
-                        out = settings.logs_dir / "exports" / f"{audit.session}_turno{audit.turn}.csv"
+                    for st in steps:
+                        out = s.logs_dir / "exports" / f"{audit.session}_turn{audit.turn}_step{st.n}.csv"
                         out.parent.mkdir(parents=True, exist_ok=True)
-                        last.df.write_csv(out)
-                        audit.write("export", path=out, rows=last.df.height)
+                        st.df.with_columns(pl.col(pl.List(pl.String)).list.join("; ")).write_csv(out)
+                        audit.write("export", path=out, rows=st.df.height)
                         console.print(f"exportado: {out.relative_to(ROOT)}", style="green")
                 elif cmd == "/log":
                     console.print(str(audit.path.relative_to(ROOT)), style="dim")
                 elif cmd == "/limpar":
-                    pipeline.reset()
+                    agent.reset()
                     console.print("contexto da conversa apagado", style="dim")
                 else:
                     console.print(f"comando desconhecido: {cmd}", style="yellow")
                 continue
 
+            status = console.status("pensando…", spinner="dots")
+            status.start()
+
+            def on_step(step: Step) -> None:
+                status.stop()
+                render_step(step, show_sql)
+                status.update("pensando…")
+                status.start()
+
             try:
-                with console.status("pensando…", spinner="dots"):
-                    ans = await pipeline.ask(text)
+                ans = await agent.ask(text, on_step=on_step)
             except KeyboardInterrupt:
                 console.print("cancelado", style="yellow")
                 continue
-            except Exception as exc:  # falha de rede/API não derruba a sessão
+            except Exception as exc:  # network/API failures do not end the session
                 audit.write("exception", error=f"{type(exc).__name__}: {exc}")
                 console.print(Panel(f"{type(exc).__name__}: {exc}", title="erro", border_style="red"))
                 continue
+            finally:
+                status.stop()
             last = ans
-            render_answer(ans, show_sql)
+            render_answer(ans)
     finally:
         audit.write("session_end")
         await db.close()
+        await write_pool.close()
         console.print(f"[dim]log da sessão: {audit.path.relative_to(ROOT)}[/dim]")
 
 

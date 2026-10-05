@@ -13,33 +13,46 @@ class Settings(BaseSettings):
     database_url: str
     openai_api_key: SecretStr
 
-    # Modelo que gera o SQL (etapa crítica) e modelo que escreve o resumo.
-    # Se LLM_MODEL_SUMMARY não for definido, usa o mesmo de LLM_MODEL_SQL.
-    # Snapshots datados: o modelo não muda por baixo entre execuções auditadas.
-    llm_model_sql: str = "openai:gpt-5.5-2026-04-23"
-    llm_model_summary: str | None = None
-    # reasoning_effort dos modelos OpenAI (none, low, medium, high)
-    llm_reasoning_sql: str | None = "medium"
-    llm_reasoning_summary: str | None = "low"
-    embedding_model: str = "text-embedding-3-small"
+    # Dated snapshot: the model does not change between audited runs
+    llm_model: str = "openai:gpt-5.5-2026-04-23"
+    llm_reasoning: str | None = "medium"  # OpenAI reasoning_effort
+    agent_max_steps: int = 15  # tool calls per question
+    embedding_model: str = "text-embedding-3-small"  # same model used by SIMCC
 
-    # Limites da tool de SQL
-    sql_timeout_s: int = 15
+    # Hybrid matching: a candidate is kept when it passes the lexical cutoff OR
+    # the semantic cutoff; the weights rank the union:
+    #   score = lexical_weight * lexical + semantic_weight * semantic
+    # Theme search (grants and productions): lexical = term found in the text (0/1)
+    theme_lexical_min: float = 1.0
+    theme_semantic_min: float = 0.40
+    theme_lexical_weight: float = 0.5
+    theme_semantic_weight: float = 0.5
+    # Grant -> advisor link (grant title vs guidance title): lexical = pg_trgm similarity
+    link_lexical_min: float = 0.80
+    link_semantic_min: float = 0.90
+    link_lexical_weight: float = 0.5
+    link_semantic_weight: float = 0.5
+    # Guidance year must fall within [grant start - before, planned end + after]
+    link_years_before: int = 1
+    link_years_after: int = 2
+    # Nearest guidance titles (HNSW) considered as link candidates per grant
+    link_candidates: int = 20
+    # Productions count as grant outcome from grant start to end + N years
+    outcome_years_after: int = 3
+
+    # SQL tool limits
+    sql_timeout_s: int = 60  # search_productions over all 295k productions takes ~20 s
     sql_max_rows: int = 1000
-    sql_max_attempts: int = 3
 
-    raw_xlsx: Path = ROOT / "data" / "raw" / "raw-data.xlsx"
-    processed_csv: Path = ROOT / "data" / "processed" / "bolsas_pq_dt.csv"
+    raw_scholarships: Path = ROOT / "data" / "raw" / "scholarships.parquet"
+    processed_dir: Path = ROOT / "data" / "processed"
+    cache_dir: Path = ROOT / "data" / "cache"
     logs_dir: Path = ROOT / "logs"
 
     @property
     def asyncpg_dsn(self) -> str:
-        # A URL segue o formato do SQLAlchemy; o asyncpg não aceita o "+asyncpg"
+        # The URL follows SQLAlchemy's format; asyncpg does not accept "+asyncpg"
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
-
-    @property
-    def summary_model(self) -> str:
-        return self.llm_model_summary or self.llm_model_sql
 
 
 @lru_cache

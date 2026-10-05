@@ -1,50 +1,73 @@
 # Qualidade e cuidados
 
-Pontos que afetam análises e respostas do chatbot.
+## Não existe identificador de bolsa
 
-## Pesquisadores com mais de uma linha
+A bolsa é **derivada** (veja a [visão geral](visao-geral.md)). Outras
+definições dariam números um pouco diferentes:
 
-Cinco `id_lattes` aparecem duas vezes. Nenhuma das duplicatas é idêntica:
+| Definição de bolsa | Bolsas | Com >1 bolsista |
+|---|---:|---:|
+| Título + resumo | 42.181 | 675 |
+| + modalidade + instituição | 42.197 | 660 |
+| **+ ciclo (data final prevista)**, a adotada | **42.622** | **544** |
 
-| Pesquisador | O que difere entre as duas linhas |
+## Linhas duplicadas
+
+Há **4.210 linhas** repetidas na planilha, idênticas em todas as colunas
+(mesmo bolsista, mesmo projeto, mesmas datas), em grupos de até 6. Elas foram
+reduzidas a 1.959 registros, e `grant_holders.source_rows` guarda quantas
+linhas cada registro tinha. A soma de `source_rows` é exatamente 45.425, o
+total de linhas da planilha.
+
+## Bolsas, vínculos e pessoas
+
+- **Uma bolsa pode ter até 3 bolsistas.** São 544 bolsas com mais de um,
+  quase todas de IC.
+- **Uma pessoa pode ter até 7 bolsas.** São 7.857 pessoas com mais de uma,
+  geralmente IC renovada ou IC seguida de mestrado.
+- **Nunca conte linhas de um JOIN como bolsas ou pessoas.** Use
+  `count(DISTINCT ...)`.
+
+## Grafias de instituição
+
+A mesma instituição aparece com nomes ou siglas diferentes:
+
+| Sigla | Variantes de nome |
 |---|---|
-| Alan Roger dos Santos Silva (UNICAMP) | nível `1D` e nível `2` |
-| Túlio Hallak Panzera (UFSJ) | nível `1C` e nível `2` |
-| João Nazareno Nonato Quaresma (UFPA) | nível `1C` e nível **vazio** |
-| Fernando de Castro Fontainha (UERJ) | `programa_fomento`: "Programas Básicos" e "Não informado" |
-| Fernanda Roberta Marciano (UFPI) | `programa_fomento`: "Programas Básicos" e "Não informado" |
+| IFBA | 5 (ex.: "Ifba - Instituto Federal…", "Instituto Federal da Bahia") |
+| UCSAL | "Católica **do** Salvador" / "Católica **de** Salvador" |
+| UESB | "…**do** Sudoeste da Bahia" / "…Sudoeste da Bahia" |
+| UNILAB | "Universidade **da** Integração…" / "Universidade **de** Integração…" |
+| UFSBA | 1 registro com a sigla `UFSB` |
 
-Por isso, **contar linhas ≠ contar pessoas** (17.945 contra 17.940). O
-chatbot precisa saber se a pergunta é sobre "bolsas" ou sobre "pesquisadores".
+O `ingest` unifica isso: `UFSB` vira `UFSBA`, e cada sigla recebe a grafia de
+nome mais frequente. Sem essa unificação, agrupar por nome dividia a UESB em
+duas linhas (317 + 15 bolsas de doutorado). A avaliação pegou esse erro.
 
-## `qtd_bolsa` = 2
+## Bolsistas sem Lattes
 
-Sete linhas têm `qtd_bolsa = 2`, todas de modalidade PQ (níveis `2` e `C`). A
-origem não explica o motivo. Somando `qtd_bolsa`, o total é 17.952 bolsas.
+103 vínculos não têm Lattes: 101 `not_found` e 2 `foreign_document`. Eles
+continuam contando como bolsistas. Cada um é contado como uma pessoa
+diferente, porque não há como saber se são a mesma pessoa.
 
-## Valores "não informados"
+## Textos
 
-| Coluna | Valor | Linhas |
-|---|---|---:|
-| `subarea` | `Não informada` | 1.459 |
-| `programa_fomento` | `Não informado` | 2 |
-| `categoria_nivel` | vazio (na planilha, o texto literal `NA`) | 1 |
+- **107 bolsas têm resumo vazio ou muito curto,** e 92 não têm
+  palavras-chave. A busca temática nessas bolsas depende do título.
+- **Título e resumo são idênticos em projetos repetidos** de anos diferentes.
+  Cada ciclo é uma bolsa.
 
-## Texto sem acentos
+## Valores incompletos
 
-`uf_nome` e `cidade` vêm sem acentos (`Sao Paulo`, `Florianopolis`). As demais
-colunas têm acentos. Ao filtrar, normalize o texto: o usuário vai digitar "São
-Paulo". Use `uf` (a sigla) sempre que puder.
+| Coluna | Problema |
+|---|---|
+| `major_area` | vazia em 56 bolsas |
+| `subarea` | sempre vazia (descartada) |
+| `course` | frequentemente vazia em IC |
+| CEPs | formatos variados, muitos vazios; não usados |
 
-## Sigla da instituição embutida no nome
+## Cobertura no SIMCC
 
-`instituicao` traz o nome e a sigla juntos (`Universidade de Brasília UnB`). O
-formato da sigla varia: `PUC/PR`, `PUC Minas`, `IF Goiano`, `hcor`. Uma busca
-por "UnB" precisa usar `LIKE`/`contains`, e não igualdade. Extrair a sigla com
-regras simples gera erros, então ela ainda não foi extraída.
-
-## Formato de datas na origem
-
-As datas vêm como texto `dd/mm/aaaa`, e a data de extração vem como `8/9/2026`.
-Tratamos todas como dia/mês, então a extração foi em **8 de setembro de 2026**.
-Essa leitura é coerente com as chamadas que começam em 01/08/2026.
+Os bolsistas são estudantes e **poucos estão no SIMCC**. A produção
+científica é encontrada sobretudo pelo **orientador**, por meio de uma
+ligação inferida. Os números estão em [SIMCC](simcc.md).

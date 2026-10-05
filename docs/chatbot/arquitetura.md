@@ -2,143 +2,176 @@
 
 ## Objetivo
 
-Validar, **pelo terminal**, que um LLM recebe uma pergunta em português sobre
-a [planilha do CNPq](../dados/visao-geral.md) e devolve **uma listagem** ou
-**uma agregação com resumo**, com números corretos. O [SIMCC](../dados/simcc.md)
-entra depois, como complemento. Para rodar, veja [Como usar](uso.md).
+Responder pelo terminal a perguntas como:
 
-## Por que text-to-SQL, e não self-query
+> As bolsas contemplam pesquisas na temática Dengue? Se sim, qual o resultado
+> desse fomento? Ele gerou artigos? livros? capítulos? de quem, quando e quantos
 
-O `SelfQueryRetriever` transforma a pergunta em
-`(texto para busca semântica, filtros)` e devolve os **k documentos mais
-parecidos**. Ele não conta nem agrupa.
+Isso exige quatro coisas:
 
-| Pergunta | Self-query | Text-to-SQL |
-|---|---|---|
-| "Pesquisadores de Física da UFMG nível A" | ✅ limitado a k resultados | ✅ |
-| "Quantas bolsas DT por região?" | ❌ | ✅ `GROUP BY` |
-| "Top 10 instituições do Nordeste" | ❌ | ✅ |
-| "Bolsistas que publicam sobre mudanças climáticas" | ✅ | ❌ (precisa dos embeddings do SIMCC) |
+1. **Busca temática nas bolsas**, por palavra-chave e por semântica.
+2. **Ligação da bolsa a pesquisadores do SIMCC**, seja o bolsista ou o
+   orientador.
+3. **Produção desses pesquisadores**, dentro de uma janela de tempo e sobre o
+   mesmo tema.
+4. **Agregação sem contar duas vezes**: uma bolsa pode ter vários bolsistas, e
+   uma obra aparece uma vez por coautor.
 
-A planilha é 100% estruturada, então quase tudo vira SQL. A busca semântica
-fica para o texto do SIMCC (fase 2).
-
-## Fluxo
+## Visão geral
 
 ```mermaid
 flowchart TD
-    Q[pergunta] --> P["<b>Planejador</b> · LLM_MODEL_SQL<br/>saída estruturada: Plano"]
-    P -->|fora_do_escopo| S
-    P -->|SQL| X["<b>Executor</b><br/>transação READ ONLY · timeout · máx. 1000 linhas"]
-    X -->|erro| P
-    X -->|tabela| S["<b>Resumo</b> · LLM_MODEL_SUMMARY"]
-    S --> V["<b>Conferência</b><br/>números do resumo ⊂ tabela?"]
-    V --> T[terminal]
-    P & X & S & V -.-> L[[logs/*.jsonl]]
+    Q[pergunta] --> A["<b>Agente</b> · LLM_MODEL<br/>loop de ferramentas, até 12 passos"]
+    A -->|run_sql + :placeholders de embedding| DB
+    subgraph DB [Postgres]
+      direction LR
+      F["funções maria.*<br/>search_grants · search_productions · grant_outcomes"]
+      T["tabelas e views maria.*<br/>grants · grant_holders · grant_researchers · productions"]
+      S["SIMCC public.*<br/>researcher · guidance · bibliographic_production<br/>search_document_production (embeddings)"]
+    end
+    DB -->|resultado| A
+    A --> R["resposta + conferência dos números"]
+    A -.-> L[[logs/*.jsonl]]
 ```
 
-Usamos **um fluxo explícito, e não um agente genérico com tools**. Cada etapa
-tem entrada e saída definidas, e isso deixa o log legível e os erros
-localizáveis.
+A lógica que define **o que conta** como correto fica no banco, em funções e
+views determinísticas e testáveis. O LLM decide **quais perguntas fazer ao
+banco** e como agregar e apresentar o resultado. Assim, regras críticas como
+"uma bolsa pode ter vários bolsistas" e "uma obra conta uma vez" não dependem
+de o modelo acertar um JOIN complexo.
 
-| Etapa | Arquivo | Detalhes |
+## Busca híbrida (lexical + semântica)
+
+Toda busca por similaridade combina dois métodos. **Cada um tem a própria
+linha de corte**, e o resultado é a **união** dos dois:
+
+```
+mantém o candidato se   lexical ≥ LEXICAL_MIN   OU   semantic ≥ SEMANTIC_MIN
+score = LEXICAL_WEIGHT · lexical + SEMANTIC_WEIGHT · semantic
+match_method = lexical | semantic | both
+```
+
+| Uso | Lexical | Semântico |
 |---|---|---|
-| Plano | `pipeline.py` | `Plano(tipo, sql, premissas, ressalvas)` via `with_structured_output`. `tipo` ∈ listagem · agregacao · fora_do_escopo |
-| Contexto | `pipeline.py` · `catalog.py` | O prompt de sistema é gerado na inicialização: descrição de cada coluna, valores distintos das colunas categóricas (lidos do banco), as 94 áreas e as regras de negócio |
-| Execução | `db.py` | Pool asyncpg com `search_path=maria,public` e `default_transaction_read_only=on`. `prepare()` rejeita múltiplos comandos. Se o SQL falhar, o erro volta ao planejador (até 3 tentativas) |
-| Resumo | `pipeline.py` | Recebe a pergunta, as premissas, as ressalvas e até 50 linhas. É instruído a citar só números presentes na tabela e a não repetir a tabela |
-| Conferência | `pipeline.py` | Extrai os números do resumo (formato BR) e verifica se cada um existe na tabela, aceitando arredondamento. Os que não existem aparecem como ⚠ |
-| Memória | `pipeline.py` | As últimas 5 trocas (pergunta + plano + amostra) dão contexto a perguntas como "e no Sul?" |
+| **Tema nas bolsas** (`search_grants`) | o termo aparece (início de palavra, sem acento) em título, resumo ou palavras-chave → 1/0 | cosseno entre o embedding da pergunta e o de título + resumo + palavras-chave |
+| **Tema nas produções** (`search_productions`) | o termo aparece no título | cosseno com o embedding do SIMCC (`search_document_production`) |
+| **Bolsa → orientador** (`grant_advisor_links`) | similaridade de trigramas (`pg_trgm`) entre os títulos | cosseno entre o embedding do título da bolsa e o do título da orientação |
 
-### Regras de negócio no prompt
+!!! note "Candidatos da ligação bolsa → orientador"
+    Comparar cada bolsa com as 158 mil orientações por trigramas levaria horas
+    (~150 ms por bolsa, mesmo com índice GIN). Por isso, os **candidatos** de
+    cada bolsa são as orientações de **título idêntico** mais os **20 títulos
+    mais próximos no índice HNSW** (`LINK_CANDIDATES`). Sobre os candidatos,
+    as **duas** notas são calculadas, e cada método aplica a própria linha de
+    corte. Um título com trigramas ≥ 0,80 é quase idêntico e cai entre os
+    vizinhos mais próximos, então a perda é teórica.
 
-Elas ficam em `catalog.py` (`RULES`) e respondem a armadilhas reais da base:
+### Calibração (05/10/2026)
 
-- **"Bolsistas" contam pessoas, "bolsas" somam bolsas.** Bolsistas é
-  `count(DISTINCT id_lattes)` e bolsas é `sum(qtd_bolsa)`.
-- **Termo de área que existe exatamente na base usa `=`; caso contrário,
-  `ILIKE`.** Sem essa regra, "Física" às vezes incluía "Biofísica".
-- **Sigla de instituição só casa no fim do nome** (`instituicao ~ '\mUSP$'`).
-  Com `ILIKE '%USP%'`, o resultado incluía o HCFMUSP, e a mesma pergunta
-  dava 59 ou 60 conforme a execução.
-- **Texto livre passa por `unaccent(...) ILIKE`**, porque cidade e UF estão
-  sem acento.
-- **As escalas de nível nunca são somadas** (1A–2 contra A–C).
-- **Percentuais e totais são calculados no SQL**, nunca estimados pelo
-  modelo.
+**Tema.** A escala do cosseno depende do texto embedado. Com `"dengue"`, o
+corte de 0,40 traz 6 bolsas sem a palavra, todas de temas vizinhos
+(chikungunya, arboviroses, *Aedes*). Com uma frase longa ("dengue e outras
+arboviroses transmitidas pelo *Aedes aegypti*"), o mesmo corte traz mais de
+340 bolsas, com muito ruído. Por isso, o prompt exige que o texto embedado seja
+**o nome curto do tema**. Muitas bolsas que citam "dengue" ficam abaixo de
+0,40: a parte lexical é indispensável.
 
-### Modelos
+**Ligação com o orientador.** Os casos aprovados só pela semântica (≥ 0,90)
+são quase todos o mesmo projeto com título abreviado (ex.: "*Moniliophthora
+perniciosa*" ↔ "*M. perniciosa*"). Os aprovados só pela parte lexical incluem
+projetos "irmãos" do mesmo grupo (ex.: "*Rhinella hoogmoedi*" ↔ "*Rhinella
+crucifer*", 0,83), que costumam ter o mesmo orientador. O embedding diferencia
+maiúsculas e minúsculas ("ANÉIS E MÓDULOS" ↔ "Anéis E Módulos" dá 0,63), o que
+subestima a nota semântica de títulos em CAIXA ALTA. Uma melhoria possível é
+vetorizar os títulos em minúsculas.
 
-| Etapa | Padrão | Por quê |
-|---|---|---|
-| SQL | `gpt-5.5-2026-04-23`, raciocínio `medium` | É onde ocorrem os erros que importam (número errado com cara de certo) |
-| Resumo | o mesmo modelo, raciocínio `low` | Ponto de partida. Trocar por um modelo menor só depois de medir com `evaluate` |
+Os valores padrão e as variáveis de ambiente estão em
+[Pipeline › Parâmetros](../dados/pipeline.md#parametros-env). A coluna
+`match_method` / `link_method` sempre diz por qual método cada item entrou, e
+a resposta informa essa distribuição.
 
-Usamos **snapshots datados**, para que o modelo não mude entre execuções
-auditadas.
+!!! note "Cobertura semântica das produções"
+    Só artigos, livros e capítulos com documento em `search_document_production`
+    têm embedding (131 mil de 295 mil). Os demais só são encontrados pelo método
+    lexical.
 
-## Resultados da avaliação
+## Ligação bolsa → pesquisador
 
-Todos os resultados abaixo são de 05/10/2026, com `gpt-5.5-2026-04-23` nas
-duas etapas e 16 casos.
+```mermaid
+flowchart LR
+    G[maria.grants] --> H[maria.grant_holders]
+    H -->|lattes_id = researcher.lattes_id| R[(public.researcher)]
+    G -->|título ≈ título da orientação<br/>mesma modalidade · ano compatível| GT[maria.guidance_titles]
+    GT -->|researcher_id| R
+    R --> P[maria.productions]
+```
 
-| Rodada | Resultado | O que mudou depois |
-|---|---|---|
-| 1× | 16/16 | — |
-| 3× (consistência) | 47/48 | `senior_usp` variou entre 59 e 60 (sigla por substring). O resumo vazou uma instrução do prompt. As duas regras foram corrigidas |
-| 2× | **32/32**, sem números não conferidos | ~3.000 tokens e 4–8 s por pergunta |
+- **`holder`:** o próprio bolsista está no SIMCC. A ligação é declarada pelo
+  Lattes.
+- **`advisor`:** existe uma orientação no SIMCC com título equivalente ao da
+  bolsa, mesma modalidade (IC ↔ Iniciação Científica, Mestrado ↔ Dissertação,
+  Doutorado ↔ Tese) e ano entre o início − 1 e o fim previsto + 2. A ligação é
+  **inferida**, e a evidência fica em `maria.grant_advisor_links`.
 
-As falhas foram encontradas lendo o log de auditoria
-(`pl.read_ndjson("logs/*_eval_*.jsonl")`), que é justamente o uso previsto
-para ele.
+## Resultado do fomento: `maria.grant_outcomes`
 
-## Banco: Postgres como motor único
+Para um tema, a função devolve uma linha por **(bolsa, pesquisador,
+produção)** em que:
 
-O SIMCC já está em Postgres com pgvector, e o DuckDB não executa os
-operadores vetoriais. A planilha fica no schema `maria`, separado das
-tabelas do SIMCC. A tabela é carregada por `poetry run load-db`, e as
-descrições das colunas viram `COMMENT ON COLUMN`. Assim o LLM gera um único
-dialeto SQL e o JOIN com o SIMCC fica a um `lattes_id` de distância.
+1. a bolsa casa com o tema;
+2. o pesquisador está ligado à bolsa (`holder` ou `advisor`);
+3. a produção é artigo, livro ou capítulo do pesquisador, publicada entre o
+   ano de início da bolsa e o ano de término + `OUTCOME_YEARS_AFTER`;
+4. a produção também casa com o tema.
+
+**Uma obra pode aparecer em várias linhas** (várias bolsas, vários
+pesquisadores, um registro por coautor no SIMCC). Contamos obras com
+`count(DISTINCT work_key)`, em que `work_key` é o DOI ou, sem DOI, o título
+normalizado + ano.
+
+## O agente
+
+`src/simcc_maria/agent.py`
+
+- **Modelo:** `gpt-5.5-2026-04-23` via **Responses API** (`use_responses_api`).
+  Nesse modelo, a OpenAI só aceita ferramentas com `reasoning_effort` nessa API.
+- **Uma ferramenta:** `run_sql(purpose, sql, embed[])`, que executa um SELECT
+  somente leitura. Placeholders `:nome` no SQL são trocados pelo embedding do
+  texto informado em `embed`, gerado com o mesmo modelo do SIMCC e guardado em
+  cache.
+- **Vários passos:** o modelo pode explorar, conferir títulos e agregar antes
+  de responder, até `AGENT_MAX_STEPS` (15). O prompt pede economia: de 4 a 6
+  consultas, com vários números por consulta. No limite, ele é obrigado a
+  responder com o que tem e a dizer o que não conseguiu verificar.
+- **Prompt de sistema** (`catalog.py`): descrição dos objetos, números de
+  referência da base (lidos do banco na inicialização), as regras de contagem
+  e o formato da resposta.
+- **Conferência:** todo número citado na resposta precisa aparecer no
+  resultado de algum passo. Os que não aparecem são marcados com ⚠.
+
+### Regras de contagem no prompt
+
+1. **Bolsa ≠ bolsista.** Bolsas são `count(DISTINCT grant_id)`. Bolsistas
+   (pessoas) são `count(DISTINCT lattes_id)` + bolsistas sem Lattes. Vínculos
+   são as linhas de `grant_holders`.
+2. **Nunca contar linhas de um JOIN.** Sempre `count(DISTINCT …)` sobre a
+   entidade contada.
+3. **Obras contam por `work_key`.**
+4. **Cobertura:** dizer quantas bolsas do tema têm algum pesquisador ligado,
+   para que "nenhuma produção encontrada" não seja lido como "nenhuma
+   produção".
+5. **Instituições:** agrupar pela sigla, que tem um nome canônico.
 
 ## Auditoria
 
-Usamos **um arquivo JSONL por sessão** em `logs/`, sem nenhum serviço
-externo. Nomes: `<data>_<chat|eval>_<sessão>.jsonl`.
-
-| Evento | Conteúdo |
-|---|---|
-| `session_start` | modelos, esforço de raciocínio, **prompt de sistema completo** + hash, hash do CSV, commit git |
-| `question` | texto da pergunta |
-| `plan` | tipo, SQL, premissas, ressalvas, tentativa, modelo |
-| `sql_error` | SQL e erro (quando o banco rejeita) |
-| `sql_result` | linhas, truncado?, ms, colunas, amostra de 20 linhas |
-| `summary` | texto e modelo |
-| `answer` | texto final, números não conferidos, tokens, latência total |
-| `command` / `export` | comandos `/` e exportações CSV |
-| `eval_case` | caso, rodada, ok, detalhe (na avaliação) |
-
-Para analisar:
+Usamos um JSONL por sessão em `logs/`. O cabeçalho (`session_start`) guarda
+todos os parâmetros (modelo, linhas de corte, pesos, janelas), o prompt
+completo, o hash dos dados e o commit. Depois vêm um evento `step` por
+consulta (propósito, SQL, textos embedados, linhas, amostra, erro) e um
+`answer` por resposta (texto, números não conferidos, tokens, tempo).
 
 ```python
 import polars as pl
-
-log = pl.read_ndjson("logs/*.jsonl")
-log.filter(pl.col("event") == "sql_error")           # SQL que falhou
-log.filter(pl.col("unverified_numbers").list.len() > 0)  # resumos suspeitos
+log = pl.read_ndjson("logs/*.jsonl", infer_schema_length=None)
+log.filter(pl.col("event") == "step").select("turn", "step", "purpose", "sql", "rows")
 ```
-
-| Alternativa | Por que não agora |
-|---|---|
-| LangSmith | Serviço externo: perguntas e dados saem da máquina |
-| Langfuse (self-hosted) | Interface ótima, mas exige subir Docker com vários serviços |
-| MLflow tracing | `autolog()` em uma linha e interface local. É a melhor opção se você sentir falta de uma interface |
-
-## Fase 2: SIMCC (não implementada)
-
-1. Uma etapa/tool **`busca_semantica`** vetoriza a pergunta com
-   `text-embedding-3-small` (o mesmo modelo que gerou os embeddings) e ordena
-   `search_document_*` por `<=>`.
-2. O planejador ganha um tipo novo (por exemplo, `semantica`) e o JOIN
-   `maria.bolsas.id_lattes = researcher.lattes_id`.
-3. As respostas que cruzam as bases avisam da cobertura de ~2,5% (os
-   bolsistas que estão no SIMCC são quase todos da Bahia).

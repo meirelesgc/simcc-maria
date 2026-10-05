@@ -1,9 +1,7 @@
-# SIMCC (fonte complementar)
+# SIMCC e ligações
 
-!!! info "Prioridade"
-    A fonte principal é a [planilha do CNPq](visao-geral.md). O SIMCC serve
-    para enriquecer: produção científica e perfil dos bolsistas que existem
-    nas duas bases.
+O SIMCC é a fonte da **produção científica** (artigos, livros, capítulos) e
+das **orientações** que ligam as bolsas aos pesquisadores.
 
 ## Conexão
 
@@ -15,84 +13,106 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5433/simcc
 ```
 
 É um dump local. Os documentos foram indexados entre 17/08/2026 e 08/09/2026.
+O chatbot **só lê** o schema `public`; tudo o que é derivado fica no schema
+`maria`.
 
-## Cobertura: o SIMCC é recortado na Bahia
+## O que usamos do SIMCC
 
-| | Pesquisadores |
-|---|---:|
-| `researcher` no SIMCC | 12.009 |
-| Bolsistas na planilha | 17.940 |
-| **Nas duas bases** (por `lattes_id`) | **443 (2,5% da planilha)** |
-
-O SIMCC cobre sobretudo instituições baianas (UFBA, UNEB, IFBA, UESB, UFRB,
-UEFS, UESC, UFSB…). Dos 443 bolsistas em comum, 420 estão na BA.
-
-!!! warning "Consequência para o chatbot"
-    Perguntas que cruzam bolsa e produção ("bolsistas PQ que publicam sobre
-    X") só têm resposta para ~2,5% dos bolsistas. O chatbot precisa dizer isso
-    na resposta, para não dar a entender que cobre o Brasil todo.
-
-## Tabelas com embeddings
-
-Os embeddings têm **1536 dimensões**. Não há índice vetorial (HNSW/IVFFlat),
-então a busca é sequencial. Nesse volume, isso é aceitável para o MVP.
-
-### `search_document_researcher`: 12.009 linhas, 1 por pesquisador
-
-| Coluna | Tipo | Observação |
-|---|---|---|
-| `researcher_id` | uuid | → `researcher.id` (único) |
-| `document_content` | text | Texto indexado: nome, instituição, áreas de atuação… |
-| `embedding` | vector(1536) | |
-| `last_indexed_at` | timestamp | |
-
-### `search_document_production`: 135.658 linhas, 1 por produção
-
-| `type` | Linhas | Tabela de origem (`production_id` →) |
+| Tabela | Linhas | Uso |
 |---|---:|---|
-| ARTICLE | 90.171 | `bibliographic_production.id` |
-| BOOK_CHAPTER | 31.629 | `bibliographic_production.id` |
-| BOOK | 9.941 | `bibliographic_production.id` |
-| REPORT | 1.941 | `research_report.id` |
-| SOFTWARE | 1.235 | `software.id` |
-| PATENT | 741 | `patent.id` |
+| `researcher` | 12.009 | pesquisadores (`lattes_id`, nome), quase todos de instituições baianas |
+| `guidance` | 422.860 | orientações: título, natureza, ano, orientador |
+| `bibliographic_production` | 295.095 (artigos, livros, capítulos) | produção, um registro por coautor |
+| `search_document_production` | 135.658 | embeddings (`text-embedding-3-small`, 1536 dim.) de 131 mil produções |
 
-`_search_document_production` tem a mesma estrutura e está vazia. Parece ser
-uma tabela de staging.
+| Tipo | Registros | Obras distintas (`work_key`) |
+|---|---:|---:|
+| Artigos | 207.270 | 155.541 |
+| Capítulos | 66.095 | 56.903 |
+| Livros | 21.730 | 18.300 |
 
-## Da produção ao bolsista da planilha
+A diferença entre registros e obras vem dos coautores: a mesma obra aparece
+uma vez para cada autor cadastrado.
+
+## Ligação bolsa → pesquisador
 
 ```mermaid
 flowchart LR
-    SDP[search_document_production] -->|production_id| BP[bibliographic_production<br/>software · patent · research_report]
-    BP -->|researcher_id| R[researcher]
-    SDR[search_document_researcher] -->|researcher_id| R
-    R -->|lattes_id = id_lattes| CSV[(planilha CNPq)]
+    G[maria.grants] --> H[maria.grant_holders]
+    H -->|lattes_id| R[(public.researcher)]
+    G -->|título ≈ título da orientação<br/>lexical OU semântico| GT[maria.guidance_titles]
+    GT -->|orientador| R
+    R --> P[maria.productions]
 ```
 
-```sql
--- artigos mais próximos de um vetor, com o lattes do autor
-SELECT r.lattes_id, r.name, b.title, b.year
-FROM search_document_production s
-JOIN bibliographic_production b ON b.id = s.production_id
-JOIN researcher r ON r.id = b.researcher_id
-WHERE s.type = 'ARTICLE'
-ORDER BY s.embedding <=> $1
-LIMIT 10;
-```
+### Pelo bolsista (`role = 'holder'`)
 
-## Tabela `foment`: bolsas que o SIMCC já tem
+Os bolsistas são estudantes, e poucos estão no SIMCC:
 
-O SIMCC tem sua própria tabela `foment`, com 413 linhas e a mesma ideia da
-planilha, mas mais pobre: sem `call_title`, sem `funding_program_name`, e com
-o nível embutido no nome (`Produtividade em Pesquisa - 1C`). Desses 413
-pesquisadores, 387 estão na planilha. Os outros 26 provavelmente têm bolsas já
-encerradas. **A planilha é a fonte de verdade para bolsas.**
+| | Valor |
+|---|---:|
+| Pessoas bolsistas que estão no SIMCC | 1.235 de 32.959 (3,7%) |
+| Bolsas ligadas por um bolsista | 1.657 |
 
-## Outras tabelas úteis
+### Pelo orientador (`role = 'advisor'`)
 
-Todas se ligam a `researcher.id` por `researcher_id`:
+Uma bolsa é ligada a um orientador quando existe uma orientação no SIMCC com:
 
-- **Perfil:** `researcher` (inclui `abstract`, `orcid`, `qtt_publications`), `researcher_production` (contagens por tipo), `researcher_area_expertise`
-- **Vínculos:** `graduate_program_researcher`, `research_group_researcher`, `researcher_institution`
-- **Atividades:** `guidance` (orientações), `research_project`, `education`
+- **título equivalente:** trigramas ≥ 0,80 **ou** cosseno ≥ 0,90;
+- **natureza compatível:** IC ↔ Iniciação Científica, Mestrado ↔ Dissertação,
+  Doutorado ↔ Tese;
+- **ano compatível:** entre o início da bolsa − 1 e o fim previsto + 2.
+
+| `link_method` | Ligações | Bolsas | Orientadores |
+|---|---:|---:|---:|
+| `lexical` (só trigramas) | 15.700 | 10.313 | 3.299 |
+| `both` | 10.556 | 7.455 | 2.966 |
+| `semantic` (só embeddings) | 272 | 209 | 196 |
+| **Total** | **26.528** | **17.158** | **4.053** |
+
+A maioria das ligações `lexical` tem título praticamente idêntico, mas nota
+semântica abaixo de 0,90. Isso acontece porque o título da bolsa costuma
+estar em CAIXA ALTA e o da orientação não, e o embedding é sensível a isso
+(veja a [calibração](../chatbot/arquitetura.md#calibracao-05102026)).
+
+Em 675 bolsas há **mais de um orientador ligado** (642 com 2, 32 com 3 e 1
+com 4). Pode ser coorientação, orientações repetidas no Lattes de pessoas
+diferentes, ou projetos "irmãos" com títulos parecidos. A evidência de cada
+ligação (título da orientação, ano, notas) fica em
+`maria.grant_advisor_links`.
+
+### Cobertura por modalidade
+
+| Modalidade | Bolsas | Pelo bolsista | Pelo orientador | **Com algum pesquisador** |
+|---|---:|---:|---:|---:|
+| IC | 30.588 | 679 | 13.993 | **14.389 (47%)** |
+| Mestrado | 7.344 | 431 | 1.929 | **2.264 (31%)** |
+| Doutorado | 3.791 | 518 | 991 | **1.425 (38%)** |
+| Mestrado Profissional | 899 | 29 | 245 | **268 (30%)** |
+| **Total** | **42.622** | **1.657** | **17.158** | **18.346 (43%)** |
+
+!!! warning "Sem ligação não significa sem produção"
+    57% das bolsas não têm nenhum pesquisador ligado no SIMCC. Para elas, a
+    produção é **desconhecida**, não zero. O chatbot informa essa cobertura em
+    toda resposta sobre resultados.
+
+## Exemplo: Dengue
+
+Com o termo `dengue` e o embedding de `"dengue"`:
+
+| | Valor |
+|---|---:|
+| Bolsas do tema | 145 (93 `both`, 46 `lexical`, 6 `semantic`) |
+| … com pesquisador ligado | 61 |
+| Artigos distintos associados | 71 (179 linhas antes de deduplicar) |
+| Capítulos distintos | 1 |
+| Bolsas / pesquisadores com produção | 36 / 17 |
+
+As 6 bolsas que entraram só pela semântica tratam de chikungunya, arboviroses
+e *Aedes*, ou seja, de temas vizinhos.
+
+## Tabela `foment` do SIMCC
+
+O SIMCC tem uma tabela `foment` (413 linhas) com bolsas de produtividade do
+CNPq. Ela **não** é usada: a fonte de bolsas deste projeto é
+`data/raw/scholarships.parquet`.

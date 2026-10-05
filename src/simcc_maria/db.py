@@ -1,4 +1,4 @@
-"""Acesso somente leitura ao Postgres para o chatbot."""
+"""Read-only Postgres access for the chatbot."""
 
 import time
 from dataclasses import dataclass
@@ -7,12 +7,13 @@ import asyncpg
 import polars as pl
 
 from simcc_maria.config import get_settings
+from simcc_maria.embeddings import Embedder
 
 
 @dataclass
 class QueryResult:
     df: pl.DataFrame
-    truncated: bool  # o resultado tinha mais linhas que sql_max_rows
+    truncated: bool  # the result had more rows than sql_max_rows
     ms: int
 
 
@@ -27,10 +28,12 @@ class Database:
             settings.asyncpg_dsn,
             min_size=1,
             max_size=4,
+            init=Embedder.init_connection,
             server_settings={
                 "search_path": "maria,public",
                 "default_transaction_read_only": "on",
                 "application_name": "simcc-maria",
+                "client_connection_check_interval": "10s",
             },
         )
         return cls(pool)
@@ -38,17 +41,17 @@ class Database:
     async def close(self) -> None:
         await self.pool.close()
 
-    async def run(self, sql: str) -> QueryResult:
-        """Executa uma consulta em transação READ ONLY, com timeout e limite de linhas."""
+    async def run(self, sql: str, args: tuple = ()) -> QueryResult:
+        """Runs a query in a READ ONLY transaction, with timeout and row limit."""
         settings = get_settings()
         start = time.perf_counter()
         async with self.pool.acquire() as con:
             async with con.transaction(readonly=True):
                 await con.execute(f"SET LOCAL statement_timeout = {settings.sql_timeout_s * 1000}")
-                # prepare() rejeita múltiplos comandos na mesma string
+                # prepare() rejects multiple statements in one string
                 stmt = await con.prepare(sql)
                 columns = [a.name for a in stmt.get_attributes()]
-                cursor = await stmt.cursor()
+                cursor = await stmt.cursor(*args)
                 records = await cursor.fetch(settings.sql_max_rows + 1)
 
         truncated = len(records) > settings.sql_max_rows
@@ -62,7 +65,7 @@ class Database:
 
 
 def _to_polars(columns: list[str], records: list[asyncpg.Record]) -> pl.DataFrame:
-    # Nomes de coluna repetidos (ex.: dois "count") quebrariam o DataFrame
+    # Repeated column names (e.g. two "count") would break the DataFrame
     seen: dict[str, int] = {}
     unique = []
     for c in columns:
