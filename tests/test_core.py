@@ -63,3 +63,25 @@ def test_names_reprova_nome_a_mais():
 
 def test_norm():
     assert norm("  São   Paulo ") == "sao paulo"
+
+
+# --- máscara de documentos (CPFs de exemplo, não pertencem a ninguém) --------
+
+from simcc_maria.resolve_lattes import cpf_valid, mask_documents  # noqa: E402
+
+
+def test_cpf_valid():
+    assert cpf_valid("52998224725")
+    assert not cpf_valid("52998224724")
+    assert not cpf_valid("11111111111")
+
+
+def test_mascara_cpf_rotulado_formatado_e_rg():
+    assert mask_documents("Rg. 123456789, CPF. 529.982.247-25") == "[RG removido], CPF. [CPF removido]"
+    assert mask_documents("CPF 111.222.333-44") == "CPF [CPF removido]"  # rotulado: mesmo inválido
+    assert mask_documents("código 52998224725") == "código [CPF removido]"  # sem rótulo, DV válido
+
+
+def test_mascara_preserva_codigos_que_nao_sao_cpf():
+    for text in ("PROSPERO: CRD42020123456", "CAAE 12345678.9.0000.5526", "123.456.789-00", "RGB 2020"):
+        assert mask_documents(text) == text

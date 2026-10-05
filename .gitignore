@@ -6,3 +6,4 @@ data/processed/
 logs/
 .maria_history
 .pytest_cache/
+data/cache/
