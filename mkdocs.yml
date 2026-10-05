@@ -2,6 +2,9 @@ site_name: SIMCC Maria
 site_description: Chatbot para perguntas em linguagem natural sobre dados de fomento à pesquisa
 docs_dir: docs
 
+validation:
+  anchors: warn
+
 theme:
   name: material
   language: pt-BR
@@ -41,6 +44,8 @@ nav:
   - Início: index.md
   - Dados:
       - Visão geral: dados/visao-geral.md
+      - Análise da base: dados/analise.md
+      - Limpezas: dados/limpeza.md
       - Dicionário de dados: dados/dicionario.md
       - Qualidade e cuidados: dados/qualidade.md
       - Pipeline: dados/pipeline.md

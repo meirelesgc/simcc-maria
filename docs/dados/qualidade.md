@@ -13,16 +13,18 @@ definições dariam números um pouco diferentes:
 
 ## Linhas duplicadas
 
-Há **4.210 linhas** repetidas na planilha, idênticas em todas as colunas
-(mesmo bolsista, mesmo projeto, mesmas datas), em grupos de até 6. Elas foram
-reduzidas a 1.959 registros, e `grant_holders.source_rows` guarda quantas
-linhas cada registro tinha. A soma de `source_rows` é exatamente 45.425, o
-total de linhas da planilha.
+Há **4.206 linhas** idênticas em todas as colunas (mesmo bolsista, mesmo
+projeto, mesmas datas), em 1.957 grupos de até 6 cópias. **2.249 cópias**
+foram removidas, e `grant_holders.source_rows` guarda quantas linhas cada
+vínculo representa. A soma de `source_rows` é exatamente 45.425, o total de
+linhas da planilha. Veja [Limpezas](limpeza.md#4-duplicatas-e-modelo-de-bolsas-ingestbuild).
 
 ## Bolsas, vínculos e pessoas
 
 - **Uma bolsa pode ter até 3 bolsistas.** São 544 bolsas com mais de um,
-  quase todas de IC.
+  quase todas de IC. Os períodos dos bolsistas se sobrepõem, porque a
+  planilha não encerra o primeiro quando o segundo entra. Não dá para
+  afirmar se foi substituição ou se foram dois bolsistas simultâneos.
 - **Uma pessoa pode ter até 7 bolsas.** São 7.857 pessoas com mais de uma,
   geralmente IC renovada ou IC seguida de mestrado.
 - **Nunca conte linhas de um JOIN como bolsas ou pessoas.** Use

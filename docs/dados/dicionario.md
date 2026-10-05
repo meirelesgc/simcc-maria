@@ -13,7 +13,7 @@ o padrão do repositório; o nome original aparece entre parênteses.
 | `abstract` | Resumo do Projeto | Vazio ou curto (< 20 caracteres) em 107 bolsas. CPF/RG digitados foram mascarados |
 | `keyword_1`…`keyword_4` | pal_chave1…4 | |
 | `start_date` | Data Inicial | `dd/mm/aaaa` na origem |
-| `end_date` | Data Final | Término efetivo (≤ `planned_end_date`) |
+| `end_date` | Data Final | Término efetivo; anterior ao previsto em 2.062 registros e posterior em 1 |
 | `planned_end_date` | Data Final_1 | Término previsto: define o **ciclo** da bolsa |
 | `institution` | Instituição | |
 | `institution_acronym` | Sigla Instituição | 62 siglas na origem; 61 após unificar `UFSB` → `UFSBA` |

@@ -18,9 +18,11 @@ Lattes ID (veja o relatório no `README.md` do repositório e o
     **mesmo projeto** (título + resumo normalizados) + **modalidade** +
     **instituição** + **ciclo** (data final prevista)
 
-    Quando um aluno é substituído no meio do ciclo, a bolsa continua sendo a
-    mesma e passa a ter dois bolsistas. Uma renovação para o ciclo seguinte é
-    outra bolsa.
+    Quando outro aluno entra no mesmo projeto, no mesmo ciclo, a bolsa continua
+    sendo a mesma e passa a ter dois bolsistas. O padrão sugere substituição,
+    mas os dados não permitem confirmar (veja a
+    [análise](analise.md#bolsas-com-mais-de-um-bolsista)). Uma renovação para o
+    ciclo seguinte é outra bolsa.
 
 ## Números principais
 
@@ -55,7 +57,11 @@ Lattes ID (veja o relatório no `README.md` do repositório e o
 | `professional_masters` | Mestrado Profissional - Cotas | 899 | 0 | 899 | 895 |
 
 Bolsas com mais de um bolsista são, na prática, um fenômeno da **Iniciação
-Científica**: são substituições de aluno dentro do mesmo ciclo.
+Científica**.
+
+Para a análise completa (evolução anual, áreas, trajetórias de bolsistas,
+preenchimento de campos), veja [Análise da base](analise.md). Para cada
+transformação feita nos dados, veja [Limpezas](limpeza.md).
 
 ## Instituições com mais bolsas
 

@@ -47,7 +47,7 @@ linhas (99,8%) com Lattes.
    momento.
 
 Os testes em `tests/test_core.py` cobrem as regras de identidade:
-substituição no mesmo ciclo, novo ciclo, duplicatas, bolsista sem Lattes, e
+segundo bolsista no mesmo ciclo, novo ciclo, duplicatas, bolsista sem Lattes, e
 modalidade ou instituição diferentes.
 
 ## 3. `load-db`: schema `maria`

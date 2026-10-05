@@ -13,7 +13,7 @@ elas no SIMCC.
 
 | Fonte | Conteúdo | Documentação |
 |---|---|---|
-| `data/raw/scholarships.parquet` | 45.425 registros → 42.622 bolsas, 32.959 bolsistas | [Visão geral](dados/visao-geral.md) |
+| `data/raw/scholarships.parquet` | 45.425 registros → 42.622 bolsas, 32.959 bolsistas | [Visão geral](dados/visao-geral.md) · [Análise](dados/analise.md) · [Limpezas](dados/limpeza.md) |
 | SIMCC (Postgres + pgvector) | pesquisadores, orientações, produções e embeddings | [SIMCC](dados/simcc.md) |
 
 ## Estrutura do repositório

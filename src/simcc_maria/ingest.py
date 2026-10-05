@@ -4,8 +4,8 @@ Input:  data/raw/scholarships.parquet   (one row per scholarship record, holder 
 Output: data/processed/grants.parquet         one row per grant
         data/processed/grant_holders.parquet  one row per (grant, holder)
 
-A grant ("bolsa") can have MORE THAN ONE holder ("bolsista"), e.g. when a
-student is replaced within the same cycle. The sheet has no grant id, so a
+A grant ("bolsa") can have MORE THAN ONE holder ("bolsista"): another student
+in the same project and cycle (likely a replacement; the source does not say). The sheet has no grant id, so a
 grant is identified by:
 
     normalized title + normalized abstract + modality + institution acronym
