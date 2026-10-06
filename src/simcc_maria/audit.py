@@ -7,6 +7,7 @@ Each line is an event with ts, session, turn and event. To analyze:
 
 import hashlib
 import json
+import os
 import secrets
 import subprocess
 from datetime import date, datetime
@@ -27,6 +28,8 @@ def sha256_text(text: str) -> str:
 
 
 def git_commit() -> str | None:
+    if commit := os.environ.get("GIT_COMMIT"):  # inside Docker there is no .git
+        return commit
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -70,7 +73,7 @@ class AuditLog:
     def start(self, system_prompt: str, **extra) -> None:
         settings = get_settings()
         params = settings.model_dump(
-            exclude={"database_url", "openai_api_key", "raw_scholarships", "processed_dir", "cache_dir", "logs_dir"}
+            exclude={"database_url", "database_host", "openai_api_key", "web_password", "raw_scholarships", "processed_dir", "cache_dir", "logs_dir"}
         )
         self.write(
             "session_start",

@@ -2,158 +2,154 @@
 
 Análise exploratória de `data/raw/scholarships.parquet` depois das
 [limpezas](limpeza.md). Os números foram calculados com polars sobre
-`data/processed/` (`grants` e `grant_holders`) em 06/10/2026.
+`data/processed/holder_records.parquet` em 06/10/2026.
+
+!!! important "Unidade de análise: o bolsista"
+    A base identifica **bolsistas** e seus registros, não **bolsas**. Toda
+    contagem abaixo é de **registros** (linhas) ou de **pessoas** (Lattes
+    distintos). Nenhum número de bolsas é informado, porque a base não permite
+    calculá-lo.
 
 ## Resumo
 
 | | Valor |
 |---|---:|
-| Registros na planilha | 45.425 |
-| Registros distintos (após remover cópias exatas) | 43.176 |
-| **Bolsas** | **42.622** |
-| Vínculos bolsa–bolsista | 43.174 |
-| **Pessoas** (bolsistas distintos) | **32.959** |
-| Bolsas com mais de um bolsista | 544 |
-| Pessoas com mais de uma bolsa | 7.857 |
+| Linhas na planilha | 45.425 |
+| Registros de bolsistas (após remover cópias exatas) | 43.176 |
+| **Bolsistas** (pessoas distintas) | **32.959** |
+| Pessoas com mais de um registro | 7.858 |
 | Instituições | 61 |
 | Grandes áreas / áreas | 11 / 164 |
-| Início das bolsas | mar/2005 a out/2026 |
+| Início dos registros | mar/2005 a out/2026 |
 | Fim previsto mais distante | set/2030 |
+| Títulos de projeto distintos | 39.854 |
 
 ## Evolução no tempo
 
-Bolsas por ano de início e modalidade:
+Registros por ano de início e modalidade, e pessoas distintas que começaram
+um registro no ano:
 
-| Ano | IC | Mestrado | Doutorado | Mestr. Prof. | Total |
-|---:|---:|---:|---:|---:|---:|
-| 2005 | 519 | — | — | — | 519 |
-| 2006 | 925 | — | — | — | 925 |
-| 2007 | 994 | — | — | — | 994 |
-| 2008 | 1.012 | — | — | — | 1.012 |
-| 2009 | 1.018 | 330 | 109 | — | 1.457 |
-| 2010 | 1.082 | 322 | 100 | — | 1.504 |
-| 2011 | 1.143 | 256 | 100 | — | 1.499 |
-| 2012 | 1.546 | 319 | 136 | 22 | 2.023 |
-| 2013 | 2.036 | 405 | 206 | 52 | 2.699 |
-| 2014 | 2.340 | 450 | 233 | 63 | 3.086 |
-| 2015 | 2.328 | 450 | 150 | 50 | 2.978 |
-| 2016 | 1.512 | 445 | 240 | 37 | 2.234 |
-| 2017 | 1.402 | 466 | 269 | 37 | 2.174 |
-| 2018 | 1.436 | 471 | 264 | 38 | 2.209 |
-| 2019 | 1.443 | 462 | 284 | 26 | 2.215 |
-| 2020 | 1.391 | 421 | 249 | 52 | 2.113 |
-| 2021 | 1.387 | 395 | 241 | 57 | 2.080 |
-| 2022 | 1.407 | 386 | 206 | 65 | 2.064 |
-| 2023 | 1.442 | 418 | 212 | 84 | 2.156 |
-| 2024 | 1.403 | 407 | 205 | 94 | 2.109 |
-| 2025 | 1.392 | 462 | 266 | 100 | 2.220 |
-| 2026 | 1.430 | 479 | 321 | 122 | 2.352 |
+| Ano | IC | Mestrado | Doutorado | Mestr. Prof. | Registros | Pessoas |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2005 | 531 | — | — | — | 531 | 530 |
+| 2006 | 941 | — | — | — | 941 | 933 |
+| 2007 | 1.005 | — | — | — | 1.005 | 991 |
+| 2008 | 1.026 | — | — | — | 1.026 | 1.014 |
+| 2009 | 1.032 | 330 | 109 | — | 1.471 | 1.446 |
+| 2010 | 1.111 | 322 | 100 | — | 1.533 | 1.490 |
+| 2011 | 1.165 | 256 | 100 | — | 1.521 | 1.485 |
+| 2012 | 1.578 | 319 | 136 | 22 | 2.055 | 2.013 |
+| 2013 | 2.078 | 405 | 206 | 52 | 2.741 | 2.695 |
+| 2014 | 2.405 | 450 | 233 | 63 | 3.151 | 3.083 |
+| 2015 | 2.381 | 450 | 150 | 50 | 3.031 | 2.976 |
+| 2016 | 1.538 | 445 | 241 | 37 | 2.261 | 2.213 |
+| 2017 | 1.417 | 467 | 269 | 37 | 2.190 | 2.182 |
+| 2018 | 1.459 | 471 | 264 | 38 | 2.232 | 2.215 |
+| 2019 | 1.471 | 462 | 285 | 26 | 2.244 | 2.219 |
+| 2020 | 1.402 | 421 | 249 | 52 | 2.124 | 2.101 |
+| 2021 | 1.399 | 395 | 241 | 57 | 2.092 | 2.063 |
+| 2022 | 1.427 | 386 | 206 | 65 | 2.084 | 2.055 |
+| 2023 | 1.479 | 418 | 212 | 84 | 2.193 | 2.146 |
+| 2024 | 1.429 | 407 | 205 | 94 | 2.135 | 2.114 |
+| 2025 | 1.415 | 462 | 266 | 100 | 2.243 | 2.225 |
+| 2026 | 1.450 | 479 | 321 | 122 | 2.372 | 2.336 |
 
 O que a tabela mostra:
 
 - **Mestrado e doutorado aparecem só a partir de 2009,** e o mestrado
   profissional a partir de 2012. Antes disso, a base só tem IC. Uma
   comparação de modalidades que inclua 2005–2008 fica distorcida.
-- **A IC teve um pico em 2013–2015** (até 2.340 bolsas por ano) e caiu para
-  cerca de 1.400 por ano a partir de 2016.
-- **O mestrado profissional cresce desde 2019:** de 26 bolsas para 122 em
+- **A IC teve um pico em 2013–2015** (até 2.405 registros por ano) e caiu para
+  cerca de 1.400–1.500 por ano a partir de 2016.
+- **O mestrado profissional cresce desde 2019:** de 26 registros para 122 em
   2026.
-- **As bolsas de 2026 ainda estão em andamento.** Os números do ano podem
+- **Os registros de 2026 ainda estão em andamento.** Os números do ano podem
   mudar em uma extração futura.
 
 ## Duração e encerramento antecipado
 
-| Modalidade | Duração prevista (mediana) | Encerradas antes do previsto |
+| Modalidade | Duração prevista (mediana) | Encerrados antes do previsto |
 |---|---:|---:|
 | IC | 12 meses | 134 (0,4%) |
 | Mestrado | 23 meses | 993 (13,5%) |
 | Mestrado Profissional | 21 meses | 78 (8,7%) |
 | Doutorado | 46 meses | 669 (17,6%) |
 
-"Encerrada antes do previsto" significa `end_date < planned_end_date`. A base
-não diz o motivo (defesa antecipada, desistência, troca de bolsa…).
+"Encerrado antes do previsto" significa `end_date < planned_end_date` no
+registro do bolsista. A base não diz o motivo (defesa antecipada,
+desistência, substituição…).
 
 ## Instituições
 
-As 10 com mais bolsas concentram 88,8% do total, e só a UFBA tem 31%:
+As 10 com mais registros concentram 88,8% do total, e só a UFBA tem 31,2%:
 
-| Sigla | Bolsas | | Sigla | Bolsas |
-|---|---:|---|---|---:|
-| UFBA | 13.345 | | UFRB | 2.301 |
-| UESC | 4.835 | | UNIFACS | 1.186 |
-| UESB | 4.547 | | EMBRAPA | 1.088 |
-| UEFS | 4.318 | | FIOCRUZ | 1.041 |
-| UNEB | 4.183 | | IFBA | 1.010 |
+| Sigla | Registros | Bolsistas | | Sigla | Registros | Bolsistas |
+|---|---:|---:|---|---|---:|---:|
+| UFBA | 13.466 | 10.957 | | UFRB | 2.326 | 1.940 |
+| UESC | 4.914 | 3.727 | | UNIFACS | 1.204 | 1.004 |
+| UESB | 4.577 | 3.409 | | EMBRAPA | 1.145 | 596 |
+| UEFS | 4.361 | 3.199 | | FIOCRUZ | 1.081 | 659 |
+| UNEB | 4.229 | 3.427 | | IFBA | 1.035 | 816 |
+
+EMBRAPA (1,9 registro por pessoa) e FIOCRUZ (1,6) têm a maior proporção de
+bolsistas com mais de um registro. Nas demais, a proporção fica entre 1,2 e
+1,4.
 
 ## Áreas do conhecimento
 
-Bolsas por grande área e modalidade:
+Registros por grande área e modalidade:
 
 | Grande área | IC | Mestrado | Doutorado | Mestr. Prof. |
 |---|---:|---:|---:|---:|
-| Ciências da Saúde | 5.294 | 851 | 441 | 95 |
-| Ciências Humanas | 4.542 | 1.289 | 592 | 285 |
-| Ciências Agrárias | 4.458 | 760 | 499 | 65 |
-| Ciências Biológicas | 4.336 | 1.081 | 625 | 39 |
-| Ciências Exatas e da Terra | 3.743 | 789 | 286 | 39 |
-| Linguística, Letras e Artes | 2.567 | 759 | 419 | 78 |
-| Engenharias | 2.488 | 473 | 208 | 35 |
-| Ciências Sociais Aplicadas | 2.303 | 706 | 307 | 163 |
-| Interdisciplinar | 476 | 442 | 299 | 58 |
-| Outros | 221 | 155 | 89 | 27 |
-| Tecnologias | 104 | 39 | 26 | 15 |
-| *(vazio)* | 56 | — | — | — |
+| Ciências da Saúde | 5.377 | 851 | 441 | 95 |
+| Ciências Humanas | 4.594 | 1.289 | 593 | 285 |
+| Ciências Agrárias | 4.571 | 761 | 500 | 65 |
+| Ciências Biológicas | 4.420 | 1.081 | 625 | 39 |
+| Ciências Exatas e da Terra | 3.807 | 789 | 286 | 39 |
+| Linguística, Letras e Artes | 2.596 | 759 | 419 | 78 |
+| Engenharias | 2.550 | 473 | 208 | 35 |
+| Ciências Sociais Aplicadas | 2.349 | 706 | 307 | 163 |
+| Interdisciplinar | 482 | 442 | 299 | 58 |
+| Outros | 224 | 155 | 89 | 27 |
+| Tecnologias | 110 | 39 | 26 | 15 |
+| *(vazio)* | 59 | — | — | — |
 
-Áreas com mais bolsas: Agronomia (2.519), Educação (2.186), Química (1.583),
-Letras (1.560), Saúde Coletiva (1.450), Medicina (1.392), Linguística (1.348),
-Interdisciplinar (1.228), História (1.144) e Enfermagem (1.089).
+Áreas com mais registros: Agronomia (2.587), Educação (2.200), Química
+(1.606), Letras (1.571), Saúde Coletiva (1.471), Medicina (1.401), Linguística
+(1.362), Interdisciplinar (1.233), História (1.147) e Enfermagem (1.097).
 
 ## Textos
 
 | Campo | Observação |
 |---|---|
 | Título | mediana de 100 caracteres (máx. 250) |
-| Resumo | mediana de 1.265 caracteres; 90% têm até 1.496 (máx. 6.565). 107 bolsas têm resumo vazio ou com menos de 20 caracteres |
-| Palavras-chave | 4 em 58% dos registros, 3 em 28%, 2 em 14%. 97 registros não têm nenhuma |
+| Resumo | mediana de 1.265 caracteres; 90% têm até 1.496 (máx. 6.565). 111 registros têm resumo vazio ou com menos de 20 caracteres |
+| Palavras-chave | 4 em 57% dos registros, 3 em 28%, 2 em 14%. 95 registros não têm nenhuma |
 
-São 43.137 palavras-chave distintas (sem acento e em minúsculas). As mais
-frequentes: educação (754), memória (527), gênero (471), epidemiologia (431),
-cultura (419), políticas públicas (411), saúde (405), literatura (380),
-conservação (376) e Bahia (363). A grafia é livre, então "saúde" e "saúde
-mental" contam separadamente. É por isso que a busca temática usa texto
-completo e embeddings, e não só as palavras-chave.
+As palavras-chave são de grafia livre. As mais frequentes (sem acento e em
+minúsculas): educação, memória, gênero, epidemiologia, cultura, políticas
+públicas, saúde, literatura, conservação e Bahia. "Saúde" e "saúde mental"
+contam separadamente. É por isso que a busca temática usa texto completo e
+embeddings, e não só as palavras-chave.
 
-## Bolsas com mais de um bolsista
+## Mesmo projeto, várias pessoas
 
-| Bolsistas por bolsa | Bolsas |
-|---:|---:|
-| 1 | 42.078 |
-| 2 | 536 |
-| 3 | 8 |
+Há 39.854 títulos de projeto distintos (comparando sem diferença de
+maiúsculas e espaços). Em **2.013** deles aparece mais de uma pessoa.
 
-- **Quase só IC:** 543 das 544 bolsas são de Iniciação Científica, e uma é de
-  mestrado.
-- **Onde aparecem:** principalmente na UFBA (120), UESC (75), EMBRAPA (57),
-  UNEB (46), UEFS (42) e FIOCRUZ (39).
-- **Datas dos bolsistas:** o segundo bolsista começa, em mediana, 123 dias
-  depois do primeiro. Em 139 dos 552 pares, os dois começam no mesmo dia.
-
-!!! warning "Substituição ou dois bolsistas ao mesmo tempo?"
-    A planilha não encerra a data do primeiro bolsista quando o segundo entra.
-    Nos 552 pares, os períodos se sobrepõem. O padrão (mesmo projeto, mesmo
-    ciclo, segundo bolsista começando meses depois) sugere **substituição**,
-    mas os dados **não permitem confirmar**. Para o chatbot, isso não muda a
-    contagem: é uma bolsa, com dois bolsistas.
+Isso **não** diz quantas bolsas existem. Um mesmo projeto pode ter tido
+bolsistas em anos diferentes, em modalidades diferentes, em bolsas diferentes
+ou numa mesma bolsa com substituição. A base não distingue esses casos.
 
 ## Trajetórias dos bolsistas
 
-Uma pessoa pode ter várias bolsas: 7.857 têm mais de uma, até 7.
+Uma pessoa pode ter vários registros: 7.858 têm mais de um, até 7.
 
-| Bolsas por pessoa | Pessoas |
+| Registros por pessoa | Pessoas |
 |---:|---:|
-| 1 | 24.999 |
+| 1 | 24.998 |
 | 2 | 5.976 |
-| 3 | 1.487 |
+| 3 | 1.488 |
 | 4 | 327 |
 | 5 a 7 | 67 |
 
@@ -171,21 +167,20 @@ Sequência de modalidades de cada pessoa, em ordem cronológica:
 | IC → Mestrado → Doutorado | 154 |
 | IC → Mestrado Profissional | 96 |
 | Mestrado Profissional → Doutorado | 15 |
-| Mestrado → IC | 5 |
-| IC → Mestrado Profissional → Doutorado | 4 |
+| outras combinações | 13 |
 
-- **Renovação de IC:** das 23.756 pessoas com IC, 5.846 tiveram duas ou mais
-  bolsas de IC.
-- **Mais de uma instituição:** 878 pessoas tiveram bolsas em instituições
+- **Mais de um registro de IC:** das 23.756 pessoas com IC, 5.846 têm dois ou
+  mais.
+- **Mais de uma instituição:** 878 pessoas aparecem em instituições
   diferentes.
-- **Casos anômalos:** 5 pessoas aparecem com mestrado antes de IC. Pode ser
-  erro de data ou um caso real raro.
+- **Casos anômalos:** 5 pessoas aparecem com mestrado antes de IC, e há outras
+  combinações raras. Pode ser erro de data ou um caso real.
 
-## Preenchimento de campos (vínculos bolsa–bolsista)
+## Preenchimento de campos
 
 | Campo | Preenchido | Observação |
 |---|---:|---|
-| `lattes_id` | 99,8% | 103 vínculos sem Lattes (69 IC, 19 doutorado, 13 mestrado, 2 mestrado profissional) |
+| `lattes_id` | 99,8% | 103 registros sem Lattes (69 IC, 19 doutorado, 13 mestrado, 2 mestrado profissional) |
 | `unit` | 92,9% | |
 | `department` | 52,8% | |
 | `course` | 27,0% | **Nunca preenchido em IC**; cerca de 96% na pós-graduação |

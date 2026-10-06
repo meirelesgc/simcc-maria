@@ -52,4 +52,5 @@ nav:
       - SIMCC e ligações: dados/simcc.md
   - Chatbot:
       - Como usar: chatbot/uso.md
+      - Interface web: chatbot/web.md
       - Arquitetura: chatbot/arquitetura.md

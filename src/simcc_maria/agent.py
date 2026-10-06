@@ -42,17 +42,30 @@ class run_sql(BaseModel):
 
 @dataclass
 class Usage:
-    tokens_in: int = 0
-    tokens_out: int = 0
+    tokens_in: int = 0  # includes the cached ones
+    tokens_cached: int = 0
+    tokens_out: int = 0  # includes reasoning
+    tokens_embed: int = 0
 
     def add(self, msg: AIMessage | None) -> None:
         meta = getattr(msg, "usage_metadata", None) or {}
         self.tokens_in += meta.get("input_tokens", 0)
+        self.tokens_cached += (meta.get("input_token_details") or {}).get("cache_read", 0)
         self.tokens_out += meta.get("output_tokens", 0)
 
     @property
     def total(self) -> int:
         return self.tokens_in + self.tokens_out
+
+    @property
+    def cost_usd(self) -> float:
+        s = get_settings()
+        return (
+            (self.tokens_in - self.tokens_cached) * s.llm_price_input
+            + self.tokens_cached * s.llm_price_cached_input
+            + self.tokens_out * s.llm_price_output
+            + self.tokens_embed * s.embedding_price
+        ) / 1_000_000
 
 
 @dataclass
@@ -88,25 +101,33 @@ class Answer:
 async def build_system_prompt(db: Database) -> str:
     s = get_settings()
     q = db.fetch_values
-    modalities = await q("SELECT modality || ' = ' || count(*) FROM maria.grants GROUP BY modality ORDER BY count(*) DESC")
-    institutions = await q(
-        "SELECT institution_acronym FROM maria.grants GROUP BY 1 ORDER BY count(*) DESC LIMIT 40"
+    modalities = await q(
+        "SELECT modality || ' = ' || count(*) || ' records' FROM maria.holder_records GROUP BY modality "
+        "ORDER BY count(*) DESC"
     )
-    areas = await q("SELECT DISTINCT major_area FROM maria.grants WHERE major_area IS NOT NULL ORDER BY 1")
+    institutions = await q(
+        "SELECT institution_acronym FROM maria.holder_records GROUP BY 1 ORDER BY count(*) DESC LIMIT 40"
+    )
+    areas = await q("SELECT DISTINCT major_area FROM maria.holder_records WHERE major_area IS NOT NULL ORDER BY 1")
     (facts,) = await q("""
         SELECT json_build_object(
-          'grants', (SELECT count(*) FROM maria.grants),
-          'grants_with_more_than_one_holder', (SELECT count(*) FROM maria.grants WHERE holder_count > 1),
-          'grant_holders', (SELECT count(*) FROM maria.grant_holders),
-          'holders_in_simcc', (SELECT count(*) FROM maria.grant_holders h
-                               JOIN public.researcher r ON r.lattes_id = h.lattes_id),
-          'grants_with_linked_researcher', (SELECT count(DISTINCT grant_id) FROM maria.grant_researchers),
-          'grant_years', (SELECT min(extract(year FROM start_date)) || '-' || max(extract(year FROM end_date))
-                          FROM maria.grants))::text
+          'holder_records', (SELECT count(*) FROM maria.holder_records),
+          'bolsistas_people', (SELECT count(DISTINCT lattes_id) + count(*) FILTER (WHERE lattes_id IS NULL)
+                               FROM maria.holder_records),
+          'people_with_more_than_one_record', (SELECT count(*) FROM (SELECT lattes_id FROM maria.holder_records
+                               WHERE lattes_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1) t),
+          'bolsistas_in_simcc', (SELECT count(DISTINCT h.lattes_id) FROM maria.holder_records h
+                                 JOIN public.researcher r ON r.lattes_id = h.lattes_id),
+          'records_with_linked_researcher', (SELECT count(DISTINCT record_id) FROM maria.record_researchers),
+          'start_years', (SELECT min(extract(year FROM start_date)) || '-' || max(extract(year FROM start_date))
+                          FROM maria.holder_records),
+          'grants', 'unknown: the source identifies bolsistas, not bolsas')::text
     """)
     return f"""\
-You answer questions about research grants (bolsas) by querying PostgreSQL with the
-`run_sql` tool. You may call it several times and join tables to reach the answer.
+You answer questions about scholarship holders (bolsistas: IC, mestrado, doutorado)
+and the scientific production associated with them, by querying PostgreSQL with
+the `run_sql` tool. You may call it several times and join tables to reach the
+answer. The data identifies bolsistas, NOT bolsas (grants).
 
 # Database
 {SCHEMA_DOC.format(years_after=s.outcome_years_after)}
@@ -213,7 +234,9 @@ class Agent:
                     sql=a.get("sql", ""),
                     embed={e["name"]: e["text"] for e in a.get("embed") or []},
                 )
+                embed_before = self.embedder.tokens  # one Embedder per agent: no other caller in between
                 await self._execute(step)
+                ans.usage.tokens_embed += self.embedder.tokens - embed_before
                 ans.steps.append(step)
                 self.audit.write(
                     "step",
@@ -245,7 +268,10 @@ class Agent:
             hit_step_limit=ans.hit_step_limit,
             unverified_numbers=ans.unverified_numbers,
             tokens_in=ans.usage.tokens_in,
+            tokens_cached=ans.usage.tokens_cached,
             tokens_out=ans.usage.tokens_out,
+            tokens_embed=ans.usage.tokens_embed,
+            cost_usd=round(ans.usage.cost_usd, 6),
             ms=ans.ms,
         )
         return ans

@@ -2,7 +2,9 @@ from datetime import date
 
 import polars as pl
 
-from simcc_maria.agent import Answer, _bind_embeddings, unverified_numbers
+from langchain_core.messages import AIMessage
+
+from simcc_maria.agent import Answer, Usage, _bind_embeddings, unverified_numbers
 from simcc_maria.evaluate import has_groups, has_numbers, norm, says_unavailable
 from simcc_maria.ingest import build
 from simcc_maria.resolve_lattes import cpf_valid, mask_documents
@@ -19,7 +21,6 @@ def scholarship(lattes, title="Projeto A", start="2015-08-01", planned_end="2016
         "department": None, "department_zip": None, "institution_acronym": inst,
         "modality": modality, "modality_label": "Iniciação Científica - Cotas",
         "course": None, "major_area": "Ciências da Saúde", "area": "Medicina",
-        "title_norm": title.lower(), "abstract_norm": "resumo do projeto",
     }
     row.update(extra)
     return row
@@ -29,57 +30,52 @@ def frame(*rows) -> pl.DataFrame:
     return pl.DataFrame(list(rows))
 
 
-# --- grant model: a grant can have more than one holder ----------------------
+# --- holder records: the data identifies bolsistas, not bolsas ---------------
 
-def test_replacement_within_cycle_is_one_grant_with_two_holders():
-    grants, holders = build(frame(
+def test_each_holder_is_a_record_no_grant_grouping():
+    records = build(frame(
         scholarship("1111111111111111", start="2015-08-01"),
-        scholarship("2222222222222222", start="2016-03-01"),  # replaced student, same cycle
+        scholarship("2222222222222222", start="2016-03-01"),  # same project, another holder
     ))
-    assert grants.height == 1
-    assert grants["holder_count"][0] == 2
-    assert holders.height == 2
-    assert grants["start_date"][0] == date(2015, 8, 1)
-
-
-def test_new_cycle_is_a_new_grant():
-    grants, _ = build(frame(
-        scholarship("1111111111111111", planned_end="2016-07-31"),
-        scholarship("1111111111111111", start="2016-08-01", planned_end="2017-07-31"),
-    ))
-    assert grants.height == 2
-    assert grants["holder_count"].to_list() == [1, 1]
+    assert records.height == 2
+    assert "grant_id" not in records.columns and "holder_count" not in records.columns
 
 
 def test_exact_duplicates_collapse_and_are_counted():
     row = scholarship("1111111111111111")
-    grants, holders = build(frame(row, row, row))
-    assert grants.height == 1 and holders.height == 1
-    assert holders["source_rows"][0] == 3
+    records = build(frame(row, row, row))
+    assert records.height == 1
+    assert records["source_rows"][0] == 3
 
 
-def test_holders_without_lattes_are_counted_individually():
-    grants, holders = build(frame(
+def test_same_person_with_different_details_stays_as_separate_records():
+    records = build(frame(
+        scholarship("1111111111111111", department="A"),
+        scholarship("1111111111111111", department="B"),
+    ))
+    assert records.height == 2
+    assert records["source_rows"].to_list() == [1, 1]
+
+
+def test_records_without_lattes_are_kept():
+    records = build(frame(
         scholarship(None, status="not_found", department="A"),
         scholarship(None, status="not_found", department="B"),
     ))
-    assert grants["holder_count"][0] == 2
-    assert holders["lattes_id"].null_count() == 2
+    assert records.height == 2
+    assert records["lattes_id"].null_count() == 2
 
 
-def test_different_modality_or_institution_are_different_grants():
-    grants, _ = build(frame(
-        scholarship("1111111111111111"),
-        scholarship("2222222222222222", modality="masters"),
-        scholarship("3333333333333333", inst="UEFS"),
-    ))
-    assert grants.height == 3
+def test_record_id_is_stable_and_unique():
+    rows = frame(scholarship("1111111111111111"), scholarship("2222222222222222"))
+    a, b = build(rows), build(rows)
+    assert a["record_id"].to_list() == b["record_id"].to_list()
+    assert a["record_id"].n_unique() == 2
 
 
-def test_grant_id_is_stable():
-    a, _ = build(frame(scholarship("1111111111111111")))
-    b, _ = build(frame(scholarship("2222222222222222")))
-    assert a["grant_id"][0] == b["grant_id"][0]  # same project/cycle → same grant
+def test_keywords_are_collected_without_nulls():
+    records = build(frame(scholarship("1111111111111111", keyword_2="aedes", keyword_3="dengue")))
+    assert records["keywords"].to_list() == [["aedes", "dengue"]]  # sorted
 
 
 def test_institution_spellings_and_acronym_aliases_are_canonical():
@@ -104,14 +100,14 @@ def test_bind_embeddings_keeps_casts():
 
 
 def test_numbers_are_checked_against_all_steps():
-    dfs = [pl.DataFrame({"grants": [126]}), pl.DataFrame({"works": [9650], "pct": [53.78]})]
-    assert unverified_numbers("Foram 126 bolsas e 9.650 obras (53,8%).", dfs) == []
-    assert unverified_numbers("Foram 127 bolsas.", dfs) == ["127"]
+    dfs = [pl.DataFrame({"records": [126]}), pl.DataFrame({"works": [9650], "pct": [53.78]})]
+    assert unverified_numbers("Foram 126 registros e 9.650 obras (53,8%).", dfs) == []
+    assert unverified_numbers("Foram 127 registros.", dfs) == ["127"]
 
 
 def test_ranks_and_list_markers_are_not_checked():
-    dfs = [pl.DataFrame({"inst": ["UFBA", "UESC"], "grants": [2332, 415]})]
-    text = "| Posição | Sigla | Bolsas |\n|---:|---|---:|\n| 1 | UFBA | 2.332 |\n| 2 | UESC | 415 |\n\n1. UFBA lidera"
+    dfs = [pl.DataFrame({"inst": ["UFBA", "UESC"], "people": [2332, 415]})]
+    text = "| Posição | Sigla | Bolsistas |\n|---:|---|---:|\n| 1 | UFBA | 2.332 |\n| 2 | UESC | 415 |\n\n1. UFBA lidera"
     assert unverified_numbers(text, dfs) == []
     assert unverified_numbers("| 1 | UFBA | 999 |", dfs) == ["999"]
 
@@ -124,6 +120,23 @@ def test_codes_are_not_numbers():
 
 def ans(text: str) -> Answer:
     return Answer(question="", text=text)
+
+
+def test_cost_separates_cached_input_and_adds_embeddings(monkeypatch):
+    monkeypatch.setenv("LLM_PRICE_INPUT", "5")
+    monkeypatch.setenv("LLM_PRICE_CACHED_INPUT", "0.5")
+    monkeypatch.setenv("LLM_PRICE_OUTPUT", "30")
+    monkeypatch.setenv("EMBEDDING_PRICE", "0.02")
+    from simcc_maria.config import get_settings
+    get_settings.cache_clear()
+    try:
+        u = Usage(tokens_embed=1_000_000)
+        u.add(AIMessage("", usage_metadata={"input_tokens": 1_000_000, "output_tokens": 100_000, "total_tokens": 1_100_000,
+                                            "input_token_details": {"cache_read": 400_000}}))
+        assert u.tokens_cached == 400_000
+        assert abs(u.cost_usd - (0.6 * 5 + 0.4 * 0.5 + 0.1 * 30 + 0.02)) < 1e-9
+    finally:
+        get_settings.cache_clear()
 
 
 def test_has_numbers():

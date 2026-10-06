@@ -9,13 +9,17 @@ Responder pelo terminal a perguntas como:
 
 Isso exige quatro coisas:
 
-1. **Busca temática nas bolsas**, por palavra-chave e por semântica.
-2. **Ligação da bolsa a pesquisadores do SIMCC**, seja o bolsista ou o
+1. **Busca temática nos registros de bolsistas**, por palavra-chave e por
+   semântica.
+2. **Ligação do registro a pesquisadores do SIMCC**, seja o bolsista ou o
    orientador.
 3. **Produção desses pesquisadores**, dentro de uma janela de tempo e sobre o
    mesmo tema.
-4. **Agregação sem contar duas vezes**: uma bolsa pode ter vários bolsistas, e
+4. **Agregação sem contar duas vezes**: uma pessoa pode ter vários registros, e
    uma obra aparece uma vez por coautor.
+
+A base identifica **bolsistas, não bolsas**. Quando a pergunta fala em bolsas
+(como a acima), a resposta deixa claro que os números se referem a bolsistas.
 
 ## Visão geral
 
@@ -25,8 +29,8 @@ flowchart TD
     A -->|run_sql + :placeholders de embedding| DB
     subgraph DB [Postgres]
       direction LR
-      F["funções maria.*<br/>search_grants · search_productions · grant_outcomes"]
-      T["tabelas e views maria.*<br/>grants · grant_holders · grant_researchers · productions"]
+      F["funções maria.*<br/>search_records · search_productions · record_outcomes"]
+      T["tabelas e views maria.*<br/>holder_records · record_researchers · productions"]
       S["SIMCC public.*<br/>researcher · guidance · bibliographic_production<br/>search_document_production (embeddings)"]
     end
     DB -->|resultado| A
@@ -37,7 +41,7 @@ flowchart TD
 A lógica que define **o que conta** como correto fica no banco, em funções e
 views determinísticas e testáveis. O LLM decide **quais perguntas fazer ao
 banco** e como agregar e apresentar o resultado. Assim, regras críticas como
-"uma bolsa pode ter vários bolsistas" e "uma obra conta uma vez" não dependem
+"bolsistas, não bolsas" e "uma obra conta uma vez" não dependem
 de o modelo acertar um JOIN complexo.
 
 ## Busca híbrida (lexical + semântica)
@@ -53,14 +57,14 @@ match_method = lexical | semantic | both
 
 | Uso | Lexical | Semântico |
 |---|---|---|
-| **Tema nas bolsas** (`search_grants`) | o termo aparece (início de palavra, sem acento) em título, resumo ou palavras-chave → 1/0 | cosseno entre o embedding da pergunta e o de título + resumo + palavras-chave |
+| **Tema nos registros de bolsistas** (`search_records`) | o termo aparece (início de palavra, sem acento) em título, resumo ou palavras-chave → 1/0 | cosseno entre o embedding da pergunta e o de título + resumo + palavras-chave |
 | **Tema nas produções** (`search_productions`) | o termo aparece no título | cosseno com o embedding do SIMCC (`search_document_production`) |
-| **Bolsa → orientador** (`grant_advisor_links`) | similaridade de trigramas (`pg_trgm`) entre os títulos | cosseno entre o embedding do título da bolsa e o do título da orientação |
+| **Registro → orientador** (`record_advisor_links`) | similaridade de trigramas (`pg_trgm`) entre os títulos | cosseno entre o embedding do título do projeto e o do título da orientação |
 
-!!! note "Candidatos da ligação bolsa → orientador"
-    Comparar cada bolsa com as 158 mil orientações por trigramas levaria horas
-    (~150 ms por bolsa, mesmo com índice GIN). Por isso, os **candidatos** de
-    cada bolsa são as orientações de **título idêntico** mais os **20 títulos
+!!! note "Candidatos da ligação registro → orientador"
+    Comparar cada registro com as 158 mil orientações por trigramas levaria horas
+    (~150 ms por registro, mesmo com índice GIN). Por isso, os **candidatos** de
+    cada registro são as orientações de **título idêntico** mais os **20 títulos
     mais próximos no índice HNSW** (`LINK_CANDIDATES`). Sobre os candidatos,
     as **duas** notas são calculadas, e cada método aplica a própria linha de
     corte. Um título com trigramas ≥ 0,80 é quase idêntico e cai entre os
@@ -69,11 +73,11 @@ match_method = lexical | semantic | both
 ### Calibração (05/10/2026)
 
 **Tema.** A escala do cosseno depende do texto embedado. Com `"dengue"`, o
-corte de 0,40 traz 6 bolsas sem a palavra, todas de temas vizinhos
+corte de 0,40 traz poucos registros sem a palavra, todos de temas vizinhos
 (chikungunya, arboviroses, *Aedes*). Com uma frase longa ("dengue e outras
 arboviroses transmitidas pelo *Aedes aegypti*"), o mesmo corte traz mais de
-340 bolsas, com muito ruído. Por isso, o prompt exige que o texto embedado seja
-**o nome curto do tema**. Muitas bolsas que citam "dengue" ficam abaixo de
+340 registros, com muito ruído. Por isso, o prompt exige que o texto embedado seja
+**o nome curto do tema**. Muitos registros que citam "dengue" ficam abaixo de
 0,40: a parte lexical é indispensável.
 
 **Ligação com o orientador.** Os casos aprovados só pela semântica (≥ 0,90)
@@ -95,13 +99,12 @@ a resposta informa essa distribuição.
     têm embedding (131 mil de 295 mil). Os demais só são encontrados pelo método
     lexical.
 
-## Ligação bolsa → pesquisador
+## Ligação registro → pesquisador
 
 ```mermaid
 flowchart LR
-    G[maria.grants] --> H[maria.grant_holders]
-    H -->|lattes_id = researcher.lattes_id| R[(public.researcher)]
-    G -->|título ≈ título da orientação<br/>mesma modalidade · ano compatível| GT[maria.guidance_titles]
+    H[maria.holder_records] -->|lattes_id = researcher.lattes_id| R[(public.researcher)]
+    H -->|título ≈ título da orientação<br/>mesma modalidade · ano compatível| GT[maria.guidance_titles]
     GT -->|researcher_id| R
     R --> P[maria.productions]
 ```
@@ -109,22 +112,22 @@ flowchart LR
 - **`holder`:** o próprio bolsista está no SIMCC. A ligação é declarada pelo
   Lattes.
 - **`advisor`:** existe uma orientação no SIMCC com título equivalente ao da
-  bolsa, mesma modalidade (IC ↔ Iniciação Científica, Mestrado ↔ Dissertação,
+  projeto, mesma modalidade (IC ↔ Iniciação Científica, Mestrado ↔ Dissertação,
   Doutorado ↔ Tese) e ano entre o início − 1 e o fim previsto + 2. A ligação é
-  **inferida**, e a evidência fica em `maria.grant_advisor_links`.
+  **inferida**, e a evidência fica em `maria.record_advisor_links`.
 
-## Resultado do fomento: `maria.grant_outcomes`
+## Resultado do fomento: `maria.record_outcomes`
 
-Para um tema, a função devolve uma linha por **(bolsa, pesquisador,
+Para um tema, a função devolve uma linha por **(registro de bolsista, pesquisador,
 produção)** em que:
 
-1. a bolsa casa com o tema;
-2. o pesquisador está ligado à bolsa (`holder` ou `advisor`);
+1. o registro (projeto do bolsista) casa com o tema;
+2. o pesquisador está ligado ao registro (`holder` ou `advisor`);
 3. a produção é artigo, livro ou capítulo do pesquisador, publicada entre o
-   ano de início da bolsa e o ano de término + `OUTCOME_YEARS_AFTER`;
+   ano de início do registro e o ano de término + `OUTCOME_YEARS_AFTER`;
 4. a produção também casa com o tema.
 
-**Uma obra pode aparecer em várias linhas** (várias bolsas, vários
+**Uma obra pode aparecer em várias linhas** (vários registros, vários
 pesquisadores, um registro por coautor no SIMCC). Contamos obras com
 `count(DISTINCT work_key)`, em que `work_key` é o DOI ou, sem DOI, o título
 normalizado + ano.
@@ -151,13 +154,14 @@ normalizado + ano.
 
 ### Regras de contagem no prompt
 
-1. **Bolsa ≠ bolsista.** Bolsas são `count(DISTINCT grant_id)`. Bolsistas
-   (pessoas) são `count(DISTINCT lattes_id)` + bolsistas sem Lattes. Vínculos
-   são as linhas de `grant_holders`.
+1. **Bolsistas, não bolsas.** A base não identifica bolsas: o chatbot nunca
+   informa número de bolsas e, se perguntado, explica a distinção. Bolsistas
+   (pessoas) são `count(DISTINCT lattes_id)` + registros sem Lattes; registros
+   são as linhas de `holder_records`.
 2. **Nunca contar linhas de um JOIN.** Sempre `count(DISTINCT …)` sobre a
    entidade contada.
 3. **Obras contam por `work_key`.**
-4. **Cobertura:** dizer quantas bolsas do tema têm algum pesquisador ligado,
+4. **Cobertura:** dizer quantos bolsistas do tema têm algum pesquisador ligado,
    para que "nenhuma produção encontrada" não seja lido como "nenhuma
    produção".
 5. **Instituições:** agrupar pela sigla, que tem um nome canônico.
@@ -168,10 +172,18 @@ Usamos um JSONL por sessão em `logs/`. O cabeçalho (`session_start`) guarda
 todos os parâmetros (modelo, linhas de corte, pesos, janelas), o prompt
 completo, o hash dos dados e o commit. Depois vêm um evento `step` por
 consulta (propósito, SQL, textos embedados, linhas, amostra, erro) e um
-`answer` por resposta (texto, números não conferidos, tokens, tempo).
+`answer` por resposta (texto, números não conferidos, tokens, custo, tempo).
+
+O custo (`cost_usd`) é calculado com os preços de
+[Pipeline › Parâmetros](../dados/pipeline.md#parametros-env): tokens de entrada
+(separando os lidos do cache da OpenAI, `tokens_cached`), de saída (incluindo
+raciocínio) e de embeddings das consultas (`tokens_embed`). É uma estimativa:
+confira os preços em [openai.com/api/pricing](https://openai.com/api/pricing)
+quando o modelo mudar.
 
 ```python
 import polars as pl
 log = pl.read_ndjson("logs/*.jsonl", infer_schema_length=None)
 log.filter(pl.col("event") == "step").select("turn", "step", "purpose", "sql", "rows")
+log.filter(pl.col("event") == "answer").select(pl.col("cost_usd").sum())  # custo total
 ```

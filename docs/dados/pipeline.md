@@ -3,7 +3,7 @@
 ```mermaid
 flowchart LR
     X[planilha com CPF<br/>não versionada] -->|resolve-lattes| R[data/raw/scholarships.parquet]
-    R -->|ingest| P[data/processed/<br/>grants.parquet<br/>grant_holders.parquet]
+    R -->|ingest| P[data/processed/<br/>holder_records.parquet]
     P -->|load-db| M[(Postgres · schema maria)]
     S[(SIMCC · schema public)] -->|orientações, produções,<br/>embeddings| M
     M --> C[chatbot]
@@ -11,7 +11,7 @@ flowchart LR
 
 ```bash
 poetry run resolve-lattes ENTRADA.xlsx data/raw/scholarships.parquet   # só quando chegar planilha nova com CPF
-poetry run ingest      # scholarships.parquet → grants.parquet + grant_holders.parquet
+poetry run ingest      # scholarships.parquet → holder_records.parquet
 poetry run load-db     # parquet + SIMCC → schema maria (tabelas, embeddings, ligações, funções)
 ```
 
@@ -31,24 +31,22 @@ poetry run load-db     # parquet + SIMCC → schema maria (tabelas, embeddings, 
 A conversão de 05/10/2026 está relatada no `README.md`: 45.317 de 45.425
 linhas (99,8%) com Lattes.
 
-## 2. `ingest`: modelo de bolsas
+## 2. `ingest`: registros de bolsistas
 
 `src/simcc_maria/ingest.py`
 
-1. **Lê `scholarships.parquet`**, converte textos vazios em nulo e datas
-   `dd/mm/aaaa` em `date`, e traduz a modalidade para código.
-2. **Junta linhas idênticas** e guarda a contagem em `source_rows`.
-3. **Cria o `grant_id`** com o hash de título + resumo normalizados,
-   modalidade, sigla da instituição e data final prevista.
-4. **Gera um bolsista por (bolsa, Lattes).** Registros sem Lattes viram um
-   bolsista cada.
-5. **Grava** `grants.parquet` e `grant_holders.parquet` em `data/processed/`.
-   Esses arquivos não são versionados e podem ser regenerados a qualquer
-   momento.
+1. **Lê `scholarships.parquet`:** remove espaços, converte vazios em nulo e
+   datas `dd/mm/aaaa` em `date`, e traduz a modalidade para código.
+2. **Unifica as instituições:** uma sigla por instituição e um nome por sigla.
+3. **Junta linhas idênticas** e guarda a contagem em `source_rows`.
+4. **Gera um registro por bolsista** (`record_id` = hash dos valores). **Não**
+   agrupa registros em bolsas, porque a origem não identifica bolsas.
+5. **Grava** `holder_records.parquet` em `data/processed/`. O arquivo não é
+   versionado e pode ser regenerado a qualquer momento.
 
-Os testes em `tests/test_core.py` cobrem as regras de identidade:
-segundo bolsista no mesmo ciclo, novo ciclo, duplicatas, bolsista sem Lattes, e
-modalidade ou instituição diferentes.
+Os testes em `tests/test_core.py` cobrem: duplicatas, registros da mesma
+pessoa com detalhes diferentes, registros sem Lattes, estabilidade do
+`record_id`, palavras-chave e grafias de instituição.
 
 ## 3. `load-db`: schema `maria`
 
@@ -57,16 +55,16 @@ tabelas do SIMCC (`public`) são só lidas.
 
 1. **Embeddings** (`text-embedding-3-small`, o mesmo modelo do SIMCC), em
    cache em `maria.embedding_cache`:
-    - título de cada bolsa, para a ligação com orientações;
+    - título de cada registro, para a ligação com orientações;
     - título + resumo + palavras-chave, para a busca temática;
     - títulos das orientações de IC, mestrado e doutorado do SIMCC.
-2. **`maria.grants` e `maria.grant_holders`**, carregadas via `COPY`.
+2. **`maria.holder_records`**, carregada via `COPY`.
 3. **`maria.productions`**: artigos, livros e capítulos do SIMCC, com
    `work_key`.
-4. **`maria.grant_advisor_links`**: ligação bolsa → orientador, por
+4. **`maria.record_advisor_links`**: ligação registro → orientador, por
    similaridade lexical **ou** semântica dos títulos (veja
    [SIMCC](simcc.md)).
-5. **View `maria.grant_researchers`** e as **funções de busca híbrida**.
+5. **View `maria.record_researchers`** e as **funções de busca híbrida**.
 
 A primeira execução gera cerca de 225 mil embeddings (~25 milhões de tokens,
 ~US$ 0,50). As seguintes reaproveitam o cache.
@@ -75,11 +73,11 @@ A primeira execução gera cerca de 225 mil embeddings (~25 milhões de tokens,
 
 | Etapa | O que faz | Tempo (com cache) |
 |---|---|---|
-| `tables` | embeddings das bolsas, `grants`, `grant_holders`, `guidance_titles`, `productions` | ~3 min |
+| `tables` | embeddings dos registros, `holder_records`, `guidance_titles`, `productions` | ~1 min |
 | `guidance` | embeddings dos títulos de orientação | segundos |
 | `vectors` | tabela de vetores das orientações + índice HNSW (em memória, 2 GB) | ~6 min |
-| `links` | ligações bolsa → orientador, em lotes de 1.000 bolsas | ~13 min |
-| `finalize` | view `grant_researchers` e funções de busca | segundos |
+| `links` | ligações registro → orientador, em lotes de 1.000 registros | ~10 min |
+| `finalize` | view `record_researchers` e funções de busca | segundos |
 
 ```bash
 poetry run load-db                        # tudo
@@ -88,8 +86,8 @@ poetry run load-db --from links --resume  # continua ligações interrompidas
 poetry run load-db --from finalize        # recria funções (ex.: mudou THEME_*)
 ```
 
-Cada lote de ligações é uma transação, e `maria.grant_link_progress` registra
-as bolsas já processadas. As conexões usam `client_connection_check_interval`:
+Cada lote de ligações é uma transação, e `maria.record_link_progress` registra
+os registros já processados. As conexões usam `client_connection_check_interval`:
 se o processo morrer, o Postgres aborta a consulta em vez de deixá-la órfã
 segurando bloqueios.
 
@@ -114,6 +112,8 @@ mudar `THEME_*` ou `OUTCOME_*`, rode `load-db --from finalize`.
 | `LINK_LEXICAL_MIN` | 0.80 | Ligação com orientador: similaridade de trigramas (`pg_trgm`) mínima entre títulos |
 | `LINK_SEMANTIC_MIN` | 0.90 | Ligação com orientador: similaridade de cosseno mínima entre títulos |
 | `LINK_LEXICAL_WEIGHT` / `LINK_SEMANTIC_WEIGHT` | 0.5 / 0.5 | Peso de cada método no `link_score` |
-| `LINK_YEARS_BEFORE` / `LINK_YEARS_AFTER` | 1 / 2 | Ano da orientação entre (início − 1) e (fim previsto + 2) |
-| `LINK_CANDIDATES` | 20 | Vizinhos mais próximos (HNSW) avaliados por bolsa, além do título idêntico |
-| `OUTCOME_YEARS_AFTER` | 3 | Produção conta como resultado até 3 anos após o fim da bolsa |
+| `LINK_YEARS_BEFORE` / `LINK_YEARS_AFTER` | 1 / 2 | Ano da orientação entre (início do registro − 1) e (fim previsto + 2) |
+| `LINK_CANDIDATES` | 20 | Vizinhos mais próximos (HNSW) avaliados por registro, além do título idêntico |
+| `OUTCOME_YEARS_AFTER` | 3 | Produção conta como resultado até 3 anos após o fim do registro do bolsista |
+| `LLM_PRICE_INPUT` / `LLM_PRICE_CACHED_INPUT` / `LLM_PRICE_OUTPUT` | 5.00 / 0.50 / 30.00 | Preço do LLM em US$ por 1M de tokens, para o custo nos logs (tokens de raciocínio contam como saída) |
+| `EMBEDDING_PRICE` | 0.02 | Preço dos embeddings em US$ por 1M de tokens (textos em cache não custam nada) |

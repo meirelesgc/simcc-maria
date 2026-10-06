@@ -1,13 +1,18 @@
 # SIMCC Maria
 
-Chatbot no terminal para perguntas em linguagem natural sobre bolsas por cotas
-(IC, mestrado e doutorado) e a produção científica associada a elas no SIMCC.
+Chatbot no terminal para perguntas em linguagem natural sobre bolsistas por cotas
+(IC, mestrado e doutorado) e a produção científica associada a eles no SIMCC.
+
+> **A base identifica bolsistas, não bolsas.** Contamos pessoas e registros de
+> bolsistas; não é possível dizer quantas bolsas existem nem quais registros
+> pertencem à mesma bolsa.
 
 ```bash
 poetry install --with docs,dev
-poetry run ingest       # data/raw/scholarships.parquet -> grants + grant_holders (data/processed)
+poetry run ingest       # data/raw/scholarships.parquet -> holder_records (data/processed)
 poetry run load-db      # schema maria no Postgres: tabelas, embeddings, ligações, funções
 poetry run maria        # chat
+poetry run maria-web    # chat no navegador (http://localhost:8001); Docker: docker compose up -d --build
 poetry run evaluate     # avaliação com respostas conhecidas
 poetry run pytest       # testes
 poetry run mkdocs serve # documentação em http://127.0.0.1:8000
@@ -19,9 +24,9 @@ Requer `.env` com `DATABASE_URL` e `OPENAI_API_KEY`.
 
 | Arquivo | Conteúdo |
 |---|---|
-| `data/raw/scholarships.parquet` | 45.425 registros de bolsistas com Lattes ID → 42.622 bolsas, 32.959 pessoas |
+| `data/raw/scholarships.parquet` | 45.425 linhas → 43.176 registros de bolsistas, de 32.959 pessoas |
 
-Uma bolsa pode ter mais de um bolsista (544 bolsas). Veja `docs/dados/visao-geral.md`.
+Veja `docs/dados/visao-geral.md`.
 
 ## Relatório: conversão CPF → Lattes ID (05/10/2026)
 

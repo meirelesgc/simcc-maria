@@ -41,11 +41,12 @@ COMMANDS = {
 EXAMPLES = [
     "As bolsas contemplam pesquisas na temática Dengue? Se sim, qual o resultado desse fomento? "
     "Ele gerou artigos? livros? capítulos? de quem, quando e quantos",
-    "Quantas bolsas e quantos bolsistas existem por modalidade?",
-    "Quantas bolsas tiveram mais de um bolsista? Mostre exemplos",
-    "Quais as 10 instituições com mais bolsas de doutorado?",
-    "Existem bolsas sobre inteligência artificial? Quantas por ano?",
-    "Quais orientadores aparecem ligados a mais bolsas sobre Zika?",
+    "Quantos bolsistas existem por modalidade?",
+    "Quantas bolsas existem?",
+    "Quantas pessoas fizeram IC e depois mestrado?",
+    "Quais as 10 instituições com mais bolsistas de doutorado?",
+    "Existem bolsistas pesquisando inteligência artificial? Quantos por ano?",
+    "Quais orientadores aparecem ligados a mais bolsistas que pesquisam Zika?",
 ]
 
 console = Console()
@@ -134,7 +135,8 @@ def render_answer(ans: Answer) -> None:
                          style="yellow"))
     if ans.hit_step_limit:
         body.append(Text(f"⚠ limite de {s.agent_max_steps} passos atingido", style="yellow"))
-    footer = (f"{len(ans.steps)} passos · {fmt(ans.usage.total)} tokens · {ans.ms / 1000:.1f}s · "
+    footer = (f"{len(ans.steps)} passos · {fmt(ans.usage.total)} tokens · US$ {ans.usage.cost_usd:.3f} · "
+              f"{ans.ms / 1000:.1f}s · "
               f"{s.llm_model.split(':')[-1]}")
     console.print(Panel(Group(*body), title="resposta", title_align="left", subtitle=footer,
                         subtitle_align="right", border_style="green"))
@@ -161,7 +163,7 @@ async def chat() -> None:
 
     console.print(Panel(
         Text.assemble(
-            ("SIMCC Maria", "bold"), " · bolsas (IC, mestrado, doutorado) e sua produção no SIMCC\n",
+            ("SIMCC Maria", "bold"), " · bolsistas (IC, mestrado, doutorado) e a produção associada no SIMCC\n",
             ("modelo: ", "dim"), s.llm_model, ("  ·  até ", "dim"), str(s.agent_max_steps), (" consultas por pergunta\n", "dim"),
             ("digite ", "dim"), ("/ajuda", "cyan"), (" para comandos ou ", "dim"), ("/exemplos", "cyan"),
             (" para começar", "dim"),

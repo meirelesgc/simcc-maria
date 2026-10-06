@@ -1,0 +1,30 @@
+# Interface web do chatbot: docker compose up -d --build
+#   página em http://localhost:8001 (ou http://<ip-da-máquina>:8001)
+# Lê DATABASE_URL, OPENAI_API_KEY e WEB_PASSWORD do .env (veja docs/chatbot/web.md).
+services:
+  maria-web:
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}  # só para o log de auditoria
+    image: simcc-maria-web
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # o Postgres é o serviço "db" da stack simcc-back, alcançado pela rede dela;
+      # usuário, senha e banco continuam vindo do DATABASE_URL do .env
+      DATABASE_HOST: ${DATABASE_HOST:-db:5432}
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8001
+    ports:
+      - "${WEB_PORT:-8001}:8001"
+    networks:
+      - simcc
+    volumes:
+      - ./logs:/app/logs                  # auditoria e custo: um JSONL por sessão
+      - ./data/raw:/app/data/raw:ro       # só para o hash dos dados no log
+
+networks:
+  simcc:
+    external: true
+    name: ${SIMCC_NETWORK:-simcc_default}

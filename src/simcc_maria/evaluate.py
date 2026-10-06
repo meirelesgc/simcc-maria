@@ -1,6 +1,6 @@
 """Evaluation: questions with known answers.
 
-Expected values come from polars over data/processed (grant/holder counts) or
+Expected values come from polars over data/processed (people/record counts) or
 from a hand-written reference SQL (theme outcomes, with the terms pinned in the
 question). Checks look for the numbers in the FINAL ANSWER TEXT, which is what
 the user reads.
@@ -29,7 +29,7 @@ from simcc_maria.audit import AuditLog
 from simcc_maria.config import ROOT, get_settings
 from simcc_maria.db import Database
 from simcc_maria.embeddings import Embedder
-from simcc_maria.ingest import read_grants
+from simcc_maria.ingest import read_records
 
 console = Console()
 NUMBER = re.compile(r"(?<![\w/])(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?(?![\w/])")
@@ -103,51 +103,77 @@ class Case:
     reference_embed: str | None = None
 
 
+def _people(df: pl.DataFrame) -> int:
+    """Distinct lattes_id plus records without lattes (each counted as a person)."""
+    return df["lattes_id"].drop_nulls().n_unique() + df["lattes_id"].null_count()
+
+
+def says_no_grant_count() -> Check:
+    """The answer must say that the base identifies bolsistas, not bolsas."""
+    phrases = ["nao identifica", "nao e possivel", "nao permite", "nao ha identificador",
+               "nao existe identificador", "nao sabemos", "nao conhecemos", "nao da para",
+               "nao informa", "nao contem", "nao possui", "nao registra"]
+
+    def check(ans: Answer) -> tuple[bool, str]:
+        t = norm(ans.text)
+        ok = "bolsista" in t and any(p in t for p in phrases)
+        return ok, "distinguiu bolsas de bolsistas" if ok else "não fez a distinção"
+    return check
+
+
 def build_cases() -> list[Case]:
-    grants, holders = read_grants()
-    people = holders["lattes_id"].n_unique() - (1 if holders["lattes_id"].null_count() else 0) \
-        + holders["lattes_id"].null_count()
+    r = read_records()
     # "masters" is left out: "Mestrado" is also a substring of "Mestrado Profissional"
     labels = {
         "undergraduate_research": ("Iniciação Científica", "undergraduate_research"),
         "professional_masters": ("Mestrado Profissional", "professional_masters"),
         "doctorate": ("Doutorado", "doctorate"),
     }
-    by_mod = grants.group_by("modality").agg(pl.len().alias("n"))
-    top_phd = (grants.filter(modality="doctorate").group_by("institution_acronym").len()
-               .sort(["len", "institution_acronym"], descending=[True, False]).head(5))
-    three = grants.filter(pl.col("holder_count") == 3).sort("grant_id")["title"][0]
-    lexical_dengue = grants.filter(
+    by_mod = {m: _people(r.filter(modality=m)) for m in labels}
+    phd = r.filter(modality="doctorate")
+    top_phd = (phd.group_by("institution_acronym").agg(pl.col("lattes_id").drop_nulls().n_unique().alias("p"),
+                                                       pl.col("lattes_id").null_count().alias("n"))
+               .with_columns((pl.col("p") + pl.col("n")).alias("people"))
+               .sort(["people", "institution_acronym"], descending=[True, False]).head(5))
+    multi = r.drop_nulls("lattes_id").group_by("lattes_id").len().filter(pl.col("len") > 1).height
+    ic_then_ms = (
+        r.drop_nulls("lattes_id").group_by("lattes_id")
+        .agg(pl.col("start_date").filter(pl.col("modality") == "undergraduate_research").min().alias("ic"),
+             pl.col("start_date").filter(pl.col("modality") == "masters").min().alias("ms"))
+        .filter(pl.col("ic").is_not_null() & pl.col("ms").is_not_null() & (pl.col("ic") < pl.col("ms"))).height
+    )
+    lexical_dengue = r.filter(
         pl.concat_str([pl.col("title"), pl.col("abstract"), pl.col("keywords").list.join(" ")],
                       separator=" ", ignore_nulls=True)
         .map_elements(norm, return_dtype=pl.String).str.contains(r"(^|[^a-z0-9])dengue")
-    ).height
+    )
 
     return [
-        Case("grants_by_modality", "Quantas bolsas existem por modalidade?",
-             has_groups({labels[m]: n for m, n in by_mod.iter_rows() if m in labels})),
-        Case("grants_and_people", "Quantas bolsas existem no total e quantas pessoas distintas foram bolsistas?",
-             has_numbers(grants.height, people)),
-        Case("multi_holder", "Quantas bolsas tiveram mais de um bolsista?",
-             has_numbers(grants.filter(pl.col("holder_count") > 1).height)),
-        Case("max_holders", "Qual o maior número de bolsistas numa mesma bolsa, e quantas bolsas têm esse número?",
-             has_numbers(3, grants.filter(pl.col("holder_count") == 3).height)),
-        Case("holders_of_grant", f"Quantos bolsistas teve a bolsa com o título \"{three}\"?",
-             has_numbers(3)),
-        Case("top5_doctorate", "Quais as 5 instituições com mais bolsas de doutorado? Diga quantas bolsas cada uma tem.",
-             has_groups({(acr,): n for acr, n in top_phd.iter_rows()})),
-        Case("start_2020", "Quantas bolsas começaram em 2020?",
-             has_numbers(grants.filter(pl.col("start_date").dt.year() == 2020).height)),
-        Case("dengue_lexical", "Quantas bolsas mencionam literalmente a palavra dengue no título, "
-                               "no resumo ou nas palavras-chave? Use só busca por palavra, sem semântica.",
-             has_numbers(lexical_dengue)),
+        Case("people_by_modality", "Quantos bolsistas (pessoas distintas) existem por modalidade?",
+             has_groups({labels[m]: n for m, n in by_mod.items()})),
+        Case("records_and_people", "Quantos registros de bolsistas existem no total e quantas pessoas distintas?",
+             has_numbers(r.height, _people(r))),
+        Case("how_many_grants", "Quantas bolsas existem?", says_no_grant_count()),
+        Case("people_multiple_records", "Quantas pessoas têm mais de um registro de bolsa?",
+             has_numbers(multi)),
+        Case("ic_then_masters", "Quantas pessoas tiveram bolsa de IC e, depois, de mestrado (acadêmico)?",
+             has_numbers(ic_then_ms)),
+        Case("top5_doctorate", "Quais as 5 instituições com mais bolsistas (pessoas) de doutorado? "
+                               "Diga quantos cada uma tem.",
+             has_groups({(acr,): n for acr, n in top_phd.select("institution_acronym", "people").iter_rows()})),
+        Case("people_start_2020", "Quantas pessoas começaram a receber bolsa em 2020?",
+             has_numbers(_people(r.filter(pl.col("start_date").dt.year() == 2020)))),
+        Case("dengue_lexical", "Quantos registros de bolsistas e quantas pessoas têm palavras começando por "
+                               "'dengue' (incluindo variações como 'dengues') no título, no resumo ou nas "
+                               "palavras-chave? Use só busca por palavra, sem semântica.",
+             has_numbers(lexical_dengue.height, _people(lexical_dengue))),
         Case("dengue_outcomes_pinned",
              "Considerando a busca temática com o termo 'dengue' e o embedding do texto 'dengue', "
-             "quantos artigos, livros e capítulos de livro distintos estão associados às bolsas desse tema?",
+             "quantos artigos, livros e capítulos de livro distintos estão associados aos bolsistas desse tema?",
              reference_embed="dengue",
              reference_sql="""
                 SELECT production_type, count(DISTINCT work_key) AS works
-                FROM maria.grant_outcomes(ARRAY['dengue'], $1::vector)
+                FROM maria.record_outcomes(ARRAY['dengue'], $1::vector)
                 GROUP BY 1""",
              reference_check=lambda df: has_groups({
                  {"ARTICLE": ("artigo", "article"), "BOOK": ("livro", "book"),
@@ -159,7 +185,8 @@ def build_cases() -> list[Case]:
         Case("dengue_question",
              "As bolsas contemplam pesquisas na temática Dengue? Se sim, qual o resultado desse fomento? "
              "Ele gerou artigos? livros? capítulos? de quem, quando e quantos"),
-        Case("out_of_scope", "Qual foi o valor total, em reais, pago nas bolsas de doutorado?", says_unavailable()),
+        Case("out_of_scope", "Qual foi o valor total, em reais, pago aos bolsistas de doutorado?",
+             says_unavailable()),
     ]
 
 
@@ -219,8 +246,9 @@ async def run(runs: int, only: str | None) -> None:
     console.print(table)
     passed = sum(ok for _, _, ok, _, _ in results)
     tokens = sum(a.usage.total for *_, a in results if a)
+    cost = sum(a.usage.cost_usd for *_, a in results if a)
     console.print(f"[bold]{passed}/{len(results)} corretas[/bold] ({passed / len(results):.0%}) · "
-                  f"{tokens:,} tokens · {s.llm_model}")
+                  f"{tokens:,} tokens · US$ {cost:.2f} · {s.llm_model}")
     console.print(f"[dim]log: {audit.path.relative_to(ROOT)}[/dim]")
 
 

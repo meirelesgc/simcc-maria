@@ -7,18 +7,20 @@ in Python memory all at once (tables join the cache by key).
 
 import asyncio
 import hashlib
+import random
 
 import asyncpg
 import numpy as np
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from pgvector.asyncpg import register_vector
 
 from simcc_maria.config import get_settings
 
 MAX_CHARS = 8000  # ~2-3k tokens in Portuguese; the model accepts 8191 tokens
-BATCH_CHARS = 400_000  # keeps each request well under the 300k tokens limit
+BATCH_CHARS = 200_000  # ~60k tokens per request
 BATCH_ITEMS = 500
-CONCURRENCY = 16  # the API takes ~10-20 s per batch; rate limits are far above this
+CONCURRENCY = 8  # keeps tokens in flight well below the 5M tokens/min limit
+MAX_ATTEMPTS = 8
 
 CACHE_DDL = """
 CREATE SCHEMA IF NOT EXISTS maria;
@@ -44,6 +46,7 @@ class Embedder:
         self.pool = pool
         self.model = s.embedding_model
         self.client = AsyncOpenAI(api_key=s.openai_api_key.get_secret_value(), timeout=120, max_retries=2)
+        self.tokens = 0  # billed tokens since creation (cached texts cost nothing)
 
     @staticmethod
     async def init_connection(con: asyncpg.Connection) -> None:
@@ -53,14 +56,20 @@ class Embedder:
         return text_key(self.model, text)
 
     async def _request(self, texts: list[str]) -> list[list[float]]:
-        for attempt in range(5):
+        for attempt in range(MAX_ATTEMPTS):
             try:
                 resp = await self.client.embeddings.create(model=self.model, input=texts)
+                self.tokens += resp.usage.total_tokens
                 return [d.embedding for d in resp.data]
-            except Exception:
-                if attempt == 4:
+            except RateLimitError:
+                # tokens-per-minute limit: wait for the window to free up
+                if attempt == MAX_ATTEMPTS - 1:
                     raise
-                await asyncio.sleep(2 ** (attempt + 1))
+                await asyncio.sleep(min(60, 5 * (attempt + 1)) + random.random() * 3)
+            except Exception:
+                if attempt == MAX_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(2 ** min(attempt + 1, 5))
         raise RuntimeError("unreachable")
 
     async def ensure(self, texts: list[str | None], label: str = "") -> list[str]:

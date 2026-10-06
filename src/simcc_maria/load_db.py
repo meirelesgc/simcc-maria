@@ -1,5 +1,8 @@
-"""Builds the `maria` schema: grants, holders, embeddings, advisor links,
+"""Builds the `maria` schema: holder records, embeddings, advisor links,
 productions and the hybrid search functions.
+
+The data describes scholarship HOLDERS (bolsistas), not grants (bolsas): there
+is no grant entity in this schema.
 
 Usage:
     poetry run load-db                        # everything
@@ -20,21 +23,29 @@ import polars as pl
 
 from simcc_maria.config import get_settings
 from simcc_maria.embeddings import CACHE_DDL, Embedder
-from simcc_maria.ingest import read_grants
+from simcc_maria.ingest import read_records
 
 DROP = """
 DROP TABLE IF EXISTS maria.bolsas CASCADE;
-DROP FUNCTION IF EXISTS maria.grant_outcomes CASCADE;
-DROP FUNCTION IF EXISTS maria.search_grants CASCADE;
-DROP FUNCTION IF EXISTS maria.search_productions CASCADE;
-DROP VIEW IF EXISTS maria.grant_researchers CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS maria.productions CASCADE;
-DROP TABLE IF EXISTS maria.grant_advisor_links CASCADE;
-DROP TABLE IF EXISTS maria.grant_link_progress CASCADE;
-DROP TABLE IF EXISTS maria.guidance_title_vectors CASCADE;
-DROP TABLE IF EXISTS maria.guidance_titles CASCADE;
+-- previous grant-based model
+DROP FUNCTION IF EXISTS maria.record_outcomes CASCADE;
+DROP FUNCTION IF EXISTS maria.search_records CASCADE;
+DROP VIEW IF EXISTS maria.record_researchers CASCADE;
+DROP TABLE IF EXISTS maria.record_advisor_links CASCADE;
+DROP TABLE IF EXISTS maria.record_link_progress CASCADE;
 DROP TABLE IF EXISTS maria.grant_holders CASCADE;
 DROP TABLE IF EXISTS maria.grants CASCADE;
+-- current model
+DROP FUNCTION IF EXISTS maria.record_outcomes CASCADE;
+DROP FUNCTION IF EXISTS maria.search_records CASCADE;
+DROP FUNCTION IF EXISTS maria.search_productions CASCADE;
+DROP VIEW IF EXISTS maria.record_researchers CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS maria.productions CASCADE;
+DROP TABLE IF EXISTS maria.record_advisor_links CASCADE;
+DROP TABLE IF EXISTS maria.record_link_progress CASCADE;
+DROP TABLE IF EXISTS maria.guidance_title_vectors CASCADE;
+DROP TABLE IF EXISTS maria.guidance_titles CASCADE;
+DROP TABLE IF EXISTS maria.holder_records CASCADE;
 """
 
 BASE_DDL = """
@@ -44,8 +55,10 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
   SELECT trim(regexp_replace(lower(public.unaccent(coalesce(t, ''))), '[^a-z0-9]+', ' ', 'g'))
 $$;
 
-CREATE TABLE maria.grants (
-  grant_id            text PRIMARY KEY,
+CREATE TABLE maria.holder_records (
+  record_id           text PRIMARY KEY,
+  lattes_id           varchar(16),
+  lattes_status       text NOT NULL,
   title               text,
   abstract            text,
   keywords            text[],
@@ -53,50 +66,37 @@ CREATE TABLE maria.grants (
   modality_label      text NOT NULL,
   institution_acronym text,
   institution         text,
+  unit                text,
+  department          text,
+  course              text,
   major_area          text,
   area                text,
   start_date          date,
   end_date            date,
   planned_end_date    date,
-  holder_count        smallint NOT NULL,
+  source_rows         integer NOT NULL,
   title_norm          text,
   search_text         text,
   title_key           text,
   content_key         text
 );
-
-CREATE TABLE maria.grant_holders (
-  grant_id      text NOT NULL REFERENCES maria.grants,
-  holder_seq    smallint NOT NULL,
-  lattes_id     varchar(16),
-  lattes_status text NOT NULL,
-  start_date    date,
-  end_date      date,
-  unit          text,
-  department    text,
-  course        text,
-  source_rows   integer NOT NULL,
-  PRIMARY KEY (grant_id, holder_seq)
-);
 """
 
 COMMENTS = {
-    "maria.grants": "One row per grant (bolsa). A grant can have more than one holder: see holder_count and maria.grant_holders.",
-    "maria.grants.grant_id": "Derived id: hash of normalized title + abstract + modality + institution_acronym + planned_end_date.",
-    "maria.grants.modality": "undergraduate_research | masters | professional_masters | doctorate.",
-    "maria.grants.modality_label": "Original label, e.g. 'Iniciação Científica - Cotas'.",
-    "maria.grants.start_date": "Earliest start among the grant holders.",
-    "maria.grants.end_date": "Latest actual end among the grant holders.",
-    "maria.grants.planned_end_date": "Planned end of the funding cycle.",
-    "maria.grants.holder_count": "Number of holders (bolsistas) of this grant. Usually 1; 544 grants have 2 or 3.",
-    "maria.grant_holders": "One row per (grant, holder). Holder = student who received the scholarship.",
-    "maria.grant_holders.lattes_id": "Lattes id of the holder; NULL when lattes_status <> 'found'.",
-    "maria.grant_holders.lattes_status": "found | not_found | foreign_document.",
-    "maria.grant_holders.source_rows": "Identical rows collapsed from the source sheet.",
+    "maria.holder_records": "One row per scholarship HOLDER record (bolsista): person + project + modality + "
+                            "institution + period. The source does not identify grants (bolsas).",
+    "maria.holder_records.record_id": "Hash of the record's values (stable between loads).",
+    "maria.holder_records.lattes_id": "Lattes id of the holder; NULL when lattes_status <> 'found'.",
+    "maria.holder_records.lattes_status": "found | not_found | foreign_document.",
+    "maria.holder_records.modality": "undergraduate_research | masters | professional_masters | doctorate.",
+    "maria.holder_records.modality_label": "Original label, e.g. 'Iniciação Científica - Cotas'.",
+    "maria.holder_records.end_date": "Actual end of the scholarship for this holder.",
+    "maria.holder_records.planned_end_date": "Planned end of the scholarship for this holder.",
+    "maria.holder_records.source_rows": "Identical rows of the source sheet collapsed into this record.",
 }
 
 GUIDANCE_DDL = """
--- Supervisions (orientações) from SIMCC whose nature matches a grant modality
+-- Supervisions (orientações) from SIMCC whose nature matches a scholarship modality
 CREATE TABLE maria.guidance_titles AS
 SELECT g.id AS guidance_id,
        g.researcher_id,
@@ -137,10 +137,10 @@ CREATE INDEX IF NOT EXISTS guidance_titles_title_key_idx ON maria.guidance_title
 """
 
 LINKS_TABLE_SQL = """
-DROP TABLE IF EXISTS maria.grant_advisor_links CASCADE;
-DROP TABLE IF EXISTS maria.grant_link_progress;
-CREATE TABLE maria.grant_advisor_links (
-  grant_id              text NOT NULL,
+DROP TABLE IF EXISTS maria.record_advisor_links CASCADE;
+DROP TABLE IF EXISTS maria.record_link_progress;
+CREATE TABLE maria.record_advisor_links (
+  record_id              text NOT NULL,
   guidance_id           uuid NOT NULL,
   advisor_researcher_id uuid NOT NULL,
   advisor_lattes_id     varchar,
@@ -152,34 +152,34 @@ CREATE TABLE maria.grant_advisor_links (
   semantic_score        float8 NOT NULL,
   link_method           text NOT NULL,
   link_score            float8 NOT NULL,
-  PRIMARY KEY (grant_id, guidance_id)
+  PRIMARY KEY (record_id, guidance_id)
 );
--- grants already processed, so an interrupted run can resume (--resume)
-CREATE TABLE maria.grant_link_progress (grant_id text PRIMARY KEY);
+-- records already processed, so an interrupted run can resume (--resume)
+CREATE TABLE maria.record_link_progress (record_id text PRIMARY KEY);
 """
 
 # Candidates: identical normalized title, plus the {k} nearest titles in the
-# HNSW index. A trigram index search per grant (~150 ms each) would take hours;
+# HNSW index. A trigram index search per record (~150 ms each) would take hours;
 # titles with trigram similarity >= the lexical cutoff are near-identical and
 # land among the nearest neighbours. BOTH scores are then computed for every
 # candidate and each method applies its own cutoff.
 LINKS_CHUNK_SQL = """
-INSERT INTO maria.grant_advisor_links
+INSERT INTO maria.record_advisor_links
 WITH g AS (
-  SELECT gr.grant_id, gr.title_norm, c.embedding AS title_vec,
+  SELECT gr.record_id, gr.title_norm, c.embedding AS title_vec,
          CASE gr.modality WHEN 'professional_masters' THEN 'masters' ELSE gr.modality END AS grp,
          extract(year FROM gr.start_date)::int - {before} AS y0,
          extract(year FROM coalesce(gr.planned_end_date, gr.end_date))::int + {after} AS y1
-  FROM maria.grants gr JOIN maria.embedding_cache c ON c.key = gr.title_key
-  WHERE gr.grant_id = ANY($1::text[]) AND length(gr.title_norm) >= 10
+  FROM maria.holder_records gr JOIN maria.embedding_cache c ON c.key = gr.title_key
+  WHERE gr.record_id = ANY($1::text[]) AND length(gr.title_norm) >= 10
 ),
 exact AS (
-  SELECT g.grant_id, t.guidance_id
+  SELECT g.record_id, t.guidance_id
   FROM g JOIN maria.guidance_titles t
     ON t.title_norm = g.title_norm AND t.modality_group = g.grp AND t.year BETWEEN g.y0 AND g.y1
 ),
 nearest AS (
-  SELECT g.grant_id, t.guidance_id
+  SELECT g.record_id, t.guidance_id
   FROM g
   CROSS JOIN LATERAL (
     SELECT v.title_key FROM maria.guidance_title_vectors v
@@ -190,13 +190,13 @@ nearest AS (
 ),
 candidates AS (SELECT * FROM exact UNION SELECT * FROM nearest),
 scored AS (
-  SELECT c.grant_id, t.guidance_id, t.researcher_id AS advisor_researcher_id,
+  SELECT c.record_id, t.guidance_id, t.researcher_id AS advisor_researcher_id,
          r.lattes_id AS advisor_lattes_id, r.name AS advisor_name,
          t.title AS guidance_title, t.nature AS guidance_nature, t.year AS guidance_year,
          similarity(t.title_norm, g.title_norm)::float8 AS lexical_score,
          (1 - (e.embedding <=> g.title_vec))::float8 AS semantic_score
   FROM candidates c
-  JOIN g USING (grant_id)
+  JOIN g USING (record_id)
   JOIN maria.guidance_titles t USING (guidance_id)
   JOIN maria.embedding_cache e ON e.key = t.title_key
   JOIN public.researcher r ON r.id = t.researcher_id
@@ -213,20 +213,20 @@ WHERE lexical_score >= {lex_min} OR semantic_score >= {sem_min};
 LINKS_CHUNK = 1000
 
 RESEARCHERS_VIEW_SQL = """
--- Researchers in SIMCC connected to a grant: the holder (same lattes_id) or the
--- advisor (supervision whose title matches the grant title)
-CREATE VIEW maria.grant_researchers AS
-SELECT h.grant_id, r.id AS researcher_id, r.lattes_id, r.name AS researcher_name,
+-- Researchers in SIMCC connected to a holder record: the holder (same lattes_id)
+-- or the advisor (supervision whose title matches the project title)
+CREATE VIEW maria.record_researchers AS
+SELECT h.record_id, r.id AS researcher_id, r.lattes_id, r.name AS researcher_name,
        'holder'::text AS role, 'lattes_id'::text AS link_method, 1.0::float8 AS link_score
-FROM maria.grant_holders h JOIN public.researcher r ON r.lattes_id = h.lattes_id
+FROM maria.holder_records h JOIN public.researcher r ON r.lattes_id = h.lattes_id
 UNION ALL
 SELECT * FROM (
-  -- one row per (grant, advisor): the strongest of its supervision matches
-  SELECT DISTINCT ON (grant_id, advisor_researcher_id)
-         grant_id, advisor_researcher_id, advisor_lattes_id, advisor_name,
+  -- one row per (record, advisor): the strongest of its supervision matches
+  SELECT DISTINCT ON (record_id, advisor_researcher_id)
+         record_id, advisor_researcher_id, advisor_lattes_id, advisor_name,
          'advisor'::text, link_method, link_score
-  FROM maria.grant_advisor_links
-  ORDER BY grant_id, advisor_researcher_id, link_score DESC
+  FROM maria.record_advisor_links
+  ORDER BY record_id, advisor_researcher_id, link_score DESC
 ) advisors;
 """
 
@@ -248,22 +248,22 @@ CREATE INDEX ON maria.productions (researcher_id, year);
 """
 
 FUNCTIONS_SQL = """
-CREATE FUNCTION maria.search_grants(
+CREATE FUNCTION maria.search_records(
   p_terms text[], p_vec vector,
   p_lexical_min float8 DEFAULT {lex_min}, p_semantic_min float8 DEFAULT {sem_min},
   p_lexical_weight float8 DEFAULT {lex_w}, p_semantic_weight float8 DEFAULT {sem_w})
-RETURNS TABLE (grant_id text, lexical float8, semantic float8, match_method text, match_score float8)
+RETURNS TABLE (record_id text, lexical float8, semantic float8, match_method text, match_score float8)
 LANGUAGE sql STABLE AS $$
   WITH s AS (
-    SELECT g.grant_id,
+    SELECT g.record_id,
            CASE WHEN EXISTS (
              SELECT 1 FROM unnest(p_terms) t
              WHERE maria.norm(t) <> '' AND ' ' || g.search_text || ' ' LIKE '% ' || maria.norm(t) || '%'
            ) THEN 1.0 ELSE 0.0 END::float8 AS lexical,
            coalesce(1 - (c.embedding <=> p_vec), 0)::float8 AS semantic
-    FROM maria.grants g LEFT JOIN maria.embedding_cache c ON c.key = g.content_key
+    FROM maria.holder_records g LEFT JOIN maria.embedding_cache c ON c.key = g.content_key
   )
-  SELECT grant_id, lexical, semantic,
+  SELECT record_id, lexical, semantic,
          CASE WHEN lexical >= p_lexical_min AND semantic >= p_semantic_min THEN 'both'
               WHEN lexical >= p_lexical_min THEN 'lexical' ELSE 'semantic' END,
          p_lexical_weight * lexical + p_semantic_weight * semantic
@@ -293,34 +293,34 @@ LANGUAGE sql STABLE AS $$
   FROM s WHERE lexical >= p_lexical_min OR semantic >= p_semantic_min
 $$;
 
--- One row per (grant, researcher, production): theme-matching productions of
--- researchers linked to theme-matching grants, published from the grant start
--- to `p_years_after` years after its end. A production may repeat across grants
--- and researchers: count with count(DISTINCT work_key).
+-- One row per (holder record, researcher, production): theme-matching
+-- productions of researchers linked to theme-matching holder records, published
+-- from the record start to `p_years_after` years after its end. A production
+-- may repeat across records and researchers: count with count(DISTINCT work_key).
 -- Only the candidate productions (of linked researchers, inside the window) are
 -- scored, with the same rule as maria.search_productions.
-CREATE FUNCTION maria.grant_outcomes(p_terms text[], p_vec vector, p_years_after int DEFAULT {years_after})
+CREATE FUNCTION maria.record_outcomes(p_terms text[], p_vec vector, p_years_after int DEFAULT {years_after})
 RETURNS TABLE (
-  grant_id text, grant_title text, modality text, institution_acronym text,
-  grant_start date, grant_end date, holder_count smallint,
-  grant_match text, grant_score float8,
+  record_id text, holder_lattes_id varchar, project_title text, modality text, institution_acronym text,
+  record_start date, record_end date,
+  record_match text, record_score float8,
   researcher_id uuid, lattes_id varchar, researcher_name varchar, role text,
   link_method text, link_score float8,
   production_id uuid, work_key text, production_type varchar, production_title varchar,
   production_year int, doi text, production_match text, production_score float8)
 LANGUAGE sql STABLE AS $$
-  WITH g AS MATERIALIZED (SELECT * FROM maria.search_grants(p_terms, p_vec)),
+  WITH g AS MATERIALIZED (SELECT * FROM maria.search_records(p_terms, p_vec)),
   -- MATERIALIZED stops the planner from scoring all productions before the join
   candidates AS MATERIALIZED (
-    SELECT gr.grant_id, gr.title AS grant_title, gr.modality, gr.institution_acronym,
-           gr.start_date, gr.end_date, gr.holder_count, g.match_method AS grant_match,
-           g.match_score AS grant_score,
+    SELECT gr.record_id, gr.lattes_id AS holder_lattes_id, gr.title AS project_title, gr.modality,
+           gr.institution_acronym, gr.start_date, gr.end_date, g.match_method AS record_match,
+           g.match_score AS record_score,
            r.researcher_id, r.lattes_id, r.researcher_name, r.role, r.link_method, r.link_score,
            pr.production_id, pr.work_key, pr.production_type, pr.title AS production_title,
            pr.year AS production_year, pr.doi, pr.title_norm
     FROM g
-    JOIN maria.grants gr ON gr.grant_id = g.grant_id
-    JOIN maria.grant_researchers r ON r.grant_id = gr.grant_id
+    JOIN maria.holder_records gr ON gr.record_id = g.record_id
+    JOIN maria.record_researchers r ON r.record_id = gr.record_id
     JOIN maria.productions pr ON pr.researcher_id = r.researcher_id
      AND pr.year BETWEEN extract(year FROM gr.start_date) AND extract(year FROM gr.end_date) + p_years_after
   ),
@@ -334,8 +334,8 @@ LANGUAGE sql STABLE AS $$
                      WHERE d.production_id = c.production_id), 0)::float8 AS semantic
     FROM candidates c
   )
-  SELECT grant_id, grant_title, modality, institution_acronym, start_date, end_date, holder_count,
-         grant_match, grant_score, researcher_id, lattes_id, researcher_name, role, link_method, link_score,
+  SELECT record_id, holder_lattes_id, project_title, modality, institution_acronym, start_date, end_date,
+         record_match, record_score, researcher_id, lattes_id, researcher_name, role, link_method, link_score,
          production_id, work_key, production_type, production_title, production_year, doi,
          CASE WHEN lexical >= {lex_min} AND semantic >= {sem_min} THEN 'both'
               WHEN lexical >= {lex_min} THEN 'lexical' ELSE 'semantic' END,
@@ -379,12 +379,12 @@ async def load(start: str, resume: bool) -> None:
         await con.execute(CACHE_DDL)
 
     if "tables" in run:
-        grants, holders = read_grants()
-        stage("embeddings: grants")
-        title_keys = await embedder.ensure(grants["title"].to_list(), "grant titles")
-        contents = [content_text(*row) for row in grants.select("title", "abstract", "keywords").iter_rows()]
-        content_keys = await embedder.ensure(contents, "grant contents")
-        grants = grants.with_columns(pl.Series("title_key", title_keys), pl.Series("content_key", content_keys))
+        records = read_records()
+        stage("embeddings: holder records")
+        title_keys = await embedder.ensure(records["title"].to_list(), "project titles")
+        contents = [content_text(*row) for row in records.select("title", "abstract", "keywords").iter_rows()]
+        content_keys = await embedder.ensure(contents, "project contents")
+        records = records.with_columns(pl.Series("title_key", title_keys), pl.Series("content_key", content_keys))
 
         stage("tables")
         async with pool.acquire() as con, con.transaction():
@@ -393,20 +393,15 @@ async def load(start: str, resume: bool) -> None:
             for obj, text in COMMENTS.items():
                 kind = "TABLE" if obj.count(".") == 1 else "COLUMN"
                 await con.execute(f"COMMENT ON {kind} {obj} IS {_quote(text)}")
-            await con.copy_records_to_table("grants", schema_name="maria", columns=grants.columns,
-                                            records=grants.iter_rows())
+            await con.copy_records_to_table("holder_records", schema_name="maria", columns=records.columns,
+                                            records=records.iter_rows())
             await con.execute("""
-                UPDATE maria.grants SET
+                UPDATE maria.holder_records SET
                   title_norm = maria.norm(title),
                   search_text = maria.norm(concat_ws(' ', title, abstract, array_to_string(keywords, ' ')))
             """)
-            h_cols = ["grant_id", "holder_seq", "lattes_id", "lattes_status", "start_date", "end_date",
-                      "unit", "department", "course", "source_rows"]
-            await con.copy_records_to_table("grant_holders", schema_name="maria", columns=h_cols,
-                                            records=holders.select(h_cols).iter_rows())
-            for idx in ("grant_holders (lattes_id)", "grants (modality)", "grants (institution_acronym)",
-                        "grants (start_date)"):
-                await con.execute(f"CREATE INDEX ON maria.{idx}")
+            for idx in ("lattes_id", "modality", "institution_acronym", "start_date"):
+                await con.execute(f"CREATE INDEX ON maria.holder_records ({idx})")
             await con.execute(GUIDANCE_DDL)
             await con.execute(PRODUCTIONS_SQL)
 
@@ -431,14 +426,14 @@ async def load(start: str, resume: bool) -> None:
     if "links" in run:
         async with pool.acquire() as con:
             await con.execute(HEAVY_SESSION_SQL)
-            exists = await con.fetchval("SELECT to_regclass('maria.grant_link_progress') IS NOT NULL")
+            exists = await con.fetchval("SELECT to_regclass('maria.record_link_progress') IS NOT NULL")
             if not (resume and exists):
                 await con.execute(LINKS_TABLE_SQL)
-            todo = [r["grant_id"] for r in await con.fetch("""
-                SELECT grant_id FROM maria.grants
-                WHERE grant_id NOT IN (SELECT grant_id FROM maria.grant_link_progress)
-                ORDER BY grant_id""")]
-            stage(f"grant -> advisor links: {len(todo)} grants to process")
+            todo = [r["record_id"] for r in await con.fetch("""
+                SELECT record_id FROM maria.holder_records
+                WHERE record_id NOT IN (SELECT record_id FROM maria.record_link_progress)
+                ORDER BY record_id""")]
+            stage(f"record -> advisor links: {len(todo)} records to process")
             sql = LINKS_CHUNK_SQL.format(
                 lex_min=s.link_lexical_min, sem_min=s.link_semantic_min,
                 lex_w=s.link_lexical_weight, sem_w=s.link_semantic_weight,
@@ -449,19 +444,19 @@ async def load(start: str, resume: bool) -> None:
                 chunk = todo[i : i + LINKS_CHUNK]
                 async with con.transaction():
                     await con.execute(sql, chunk)
-                    await con.execute("INSERT INTO maria.grant_link_progress SELECT unnest($1::text[])", chunk)
+                    await con.execute("INSERT INTO maria.record_link_progress SELECT unnest($1::text[])", chunk)
                 done = i + len(chunk)
                 rate = done / (time.monotonic() - started)
-                print(f"    {done}/{len(todo)} grants · {rate:.0f}/s · ~{(len(todo) - done) / rate / 60:.0f} min left",
+                print(f"    {done}/{len(todo)} records · {rate:.0f}/s · ~{(len(todo) - done) / rate / 60:.0f} min left",
                       flush=True)
 
     if "finalize" in run:
         stage("views and functions")
         async with pool.acquire() as con, con.transaction():
-            await con.execute("CREATE INDEX IF NOT EXISTS grant_advisor_links_advisor_idx "
-                              "ON maria.grant_advisor_links (advisor_researcher_id)")
-            await con.execute("DROP VIEW IF EXISTS maria.grant_researchers CASCADE")
-            for fn in ("grant_outcomes", "search_grants", "search_productions"):
+            await con.execute("CREATE INDEX IF NOT EXISTS record_advisor_links_advisor_idx "
+                              "ON maria.record_advisor_links (advisor_researcher_id)")
+            await con.execute("DROP VIEW IF EXISTS maria.record_researchers CASCADE")
+            for fn in ("record_outcomes", "search_records", "search_productions"):
                 await con.execute(f"DROP FUNCTION IF EXISTS maria.{fn} CASCADE")
             await con.execute(RESEARCHERS_VIEW_SQL)
             await con.execute(FUNCTIONS_SQL.format(
@@ -470,15 +465,15 @@ async def load(start: str, resume: bool) -> None:
                 years_after=s.outcome_years_after,
             ))
         async with pool.acquire() as con:
-            await con.execute("ANALYZE maria.grants; ANALYZE maria.grant_holders; "
-                              "ANALYZE maria.productions; ANALYZE maria.grant_advisor_links;")
+            await con.execute("ANALYZE maria.holder_records; "
+                              "ANALYZE maria.productions; ANALYZE maria.record_advisor_links;")
             summary = await con.fetchrow("""
-                SELECT (SELECT count(*) FROM maria.grants) AS grants,
-                       (SELECT count(*) FROM maria.grant_holders) AS holders,
+                SELECT (SELECT count(*) FROM maria.holder_records) AS records,
+                       (SELECT count(DISTINCT lattes_id) FROM maria.holder_records) AS people_with_lattes,
                        (SELECT count(*) FROM maria.guidance_titles) AS guidance_titles,
                        (SELECT count(*) FROM maria.productions) AS productions,
-                       (SELECT count(*) FROM maria.grant_advisor_links) AS advisor_links,
-                       (SELECT count(DISTINCT grant_id) FROM maria.grant_researchers) AS grants_with_researcher
+                       (SELECT count(*) FROM maria.record_advisor_links) AS advisor_links,
+                       (SELECT count(DISTINCT record_id) FROM maria.record_researchers) AS records_with_researcher
             """)
             print(dict(summary))
     await pool.close()

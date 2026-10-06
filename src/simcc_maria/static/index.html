@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIMCC Maria</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e2e1dc;
+    --accent: #1f6feb; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e; --code: #f0efeb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --text: #e8e7e3; --muted: #9a9993; --border: #34342f;
+      --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --err: #f85149; --code: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--border); }
+  .bar { max-width: 960px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
+  .bar h1 { font-size: 17px; margin: 0; }
+  .bar .meta { color: var(--muted); font-size: 13px; margin-left: auto; text-align: right; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px 16px 160px; }
+  .intro { color: var(--muted); }
+  .examples { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 24px; }
+  .examples button { text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--border);
+                     border-radius: 8px; padding: 8px 12px; font: inherit; cursor: pointer; }
+  .examples button:hover { border-color: var(--accent); }
+  .q { margin: 28px 0 10px; padding: 10px 14px; background: var(--panel); border-left: 3px solid var(--accent);
+       border-radius: 6px; font-weight: 500; white-space: pre-wrap; }
+  details.step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; }
+  details.step.err { border-color: var(--err); }
+  details.step summary { padding: 7px 12px; cursor: pointer; display: flex; gap: 10px; }
+  details.step summary .p { flex: 1; }
+  details.step summary .s { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .stepbody { padding: 0 12px 10px; overflow-x: auto; }
+  pre { background: var(--code); padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 13px; margin: 6px 0; }
+  .emb { color: #a33ea1; font-family: ui-monospace, monospace; font-size: 13px; }
+  table { border-collapse: collapse; font-size: 13px; margin: 6px 0; }
+  th, td { padding: 4px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th { color: var(--accent); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .caption { color: var(--muted); font-size: 12px; }
+  .caption a { color: var(--accent); }
+  .answer { background: var(--panel); border: 1px solid var(--ok); border-radius: 8px; padding: 4px 16px 10px; margin: 10px 0; }
+  .answer .md { overflow-x: auto; }
+  .answer .foot { color: var(--muted); font-size: 12px; text-align: right; border-top: 1px solid var(--border); padding-top: 6px; }
+  .warn { color: var(--warn); font-size: 13px; margin: 6px 0; }
+  .error { color: var(--err); background: var(--panel); border: 1px solid var(--err); border-radius: 8px; padding: 10px 14px; }
+  .thinking { color: var(--muted); font-size: 14px; margin: 8px 0; }
+  .thinking::after { content: "…"; animation: dots 1.2s steps(3) infinite; }
+  @keyframes dots { 0% { content: "."; } 33% { content: ".."; } 66% { content: "..."; } }
+  form { position: fixed; bottom: 0; left: 0; right: 0; background: var(--bg); border-top: 1px solid var(--border); }
+  .form { max-width: 960px; margin: 0 auto; padding: 10px 16px 14px; display: flex; gap: 8px; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 44px; max-height: 180px; padding: 10px 12px; font: inherit; color: var(--text);
+             background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .btn { font: inherit; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--accent); cursor: pointer;
+         background: var(--accent); color: #fff; }
+  .btn.ghost { background: transparent; color: var(--muted); border-color: var(--border); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  label.sql { color: var(--muted); font-size: 13px; display: flex; gap: 4px; align-items: center; white-space: nowrap; }
+  @media (max-width: 600px) { .bar .meta span.model { display: none; } label.sql { display: none; } }
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <h1>SIMCC Maria</h1>
+  <div class="meta"><span class="model" id="model"></span> <span id="cost"></span></div>
+</div></header>
+
+<main id="log">
+  <p class="intro">Perguntas sobre <b>bolsistas</b> por cotas (IC, mestrado e doutorado) e a produção científica
+    associada a eles no SIMCC. A base identifica bolsistas, não bolsas. Cada pergunta faz várias consultas ao banco;
+    abra um passo para ver o SQL e o resultado. Números marcados com ⚠ não aparecem em nenhum resultado.</p>
+  <div class="examples" id="examples"></div>
+</main>
+
+<form id="form"><div class="form">
+  <textarea id="q" rows="1" placeholder="Faça uma pergunta… (Enter envia, Shift+Enter quebra linha)"></textarea>
+  <label class="sql"><input type="checkbox" id="showsql" checked> SQL</label>
+  <button class="btn ghost" type="button" id="reset" title="Esquece o contexto da conversa">Limpar</button>
+  <button class="btn" type="submit" id="send">Enviar</button>
+</div></form>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const log = $("#log"), q = $("#q"), send = $("#send");
+const usd = (v) => "US$ " + v.toFixed(3);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) k === "class" ? e.className = v : e.setAttribute(k, v);
+  for (const k of kids) e.append(k);
+  return e;
+};
+const scroll = () => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+
+function showCost(v, n) { $("#cost").textContent = `· ${n} pergunta${n === 1 ? "" : "s"} · ${usd(v)} nesta sessão`; }
+
+async function init() {
+  const info = await (await fetch("api/info")).json();
+  $("#model").textContent = `${info.model} · até ${info.max_steps} consultas`;
+  showCost(info.session_cost_usd, info.questions);
+  for (const ex of info.examples) {
+    const b = el("button", { type: "button" }, ex);
+    b.onclick = () => { q.value = ex; ask(); };
+    $("#examples").append(b);
+  }
+}
+
+function renderTable(st) {
+  if (!st.rows) return el("div", { class: "caption" }, "nenhuma linha");
+  const t = el("table"), head = el("tr");
+  st.columns.forEach(c => head.append(el("th", { class: c.numeric ? "num" : "" }, c.name)));
+  t.append(el("thead", {}, head));
+  const body = el("tbody");
+  for (const row of st.data) {
+    const tr = el("tr");
+    row.forEach((v, i) => tr.append(el("td", { class: st.columns[i].numeric ? "num" : "" }, v)));
+    body.append(tr);
+  }
+  t.append(body);
+  return t;
+}
+
+function renderStep(st) {
+  const sub = st.error ? "erro" : `${st.rows.toLocaleString("pt-BR")}${st.truncated ? "+" : ""} linhas · ${st.ms} ms`;
+  const d = el("details", { class: "step" + (st.error ? " err" : "") },
+    el("summary", {}, el("span", { class: "p" }, `passo ${st.n} · ${st.purpose}`), el("span", { class: "s" }, sub)));
+  const body = el("div", { class: "stepbody" });
+  const sqlBox = el("div", { class: "sqlbox" }, el("pre", {}, st.sql));
+  for (const [name, text] of Object.entries(st.embed || {}))
+    sqlBox.append(el("div", { class: "emb" }, `:${name} = embedding("${text}")`));
+  sqlBox.hidden = !$("#showsql").checked;
+  body.append(sqlBox);
+  if (st.error) body.append(el("pre", { class: "warn" }, st.error));
+  else {
+    body.append(renderTable(st));
+    const cap = el("div", { class: "caption" });
+    if (st.rows > st.data.length) cap.append(`mostrando ${st.data.length} de ${st.rows.toLocaleString("pt-BR")} linhas · `);
+    cap.append(el("a", { href: `api/export/${st.n}.csv` }, "baixar CSV"));
+    body.append(cap);
+  }
+  d.append(body);
+  return d;
+}
+
+function renderAnswer(a) {
+  const box = el("div", { class: "answer" });
+  const md = el("div", { class: "md" });
+  md.innerHTML = DOMPurify.sanitize(marked.parse(a.text || "_sem resposta_"));
+  box.append(md);
+  if (a.unverified_numbers.length)
+    box.append(el("div", { class: "warn" }, "⚠ números não encontrados nos resultados: " + a.unverified_numbers.join(", ")));
+  if (a.hit_step_limit) box.append(el("div", { class: "warn" }, "⚠ limite de passos atingido"));
+  box.append(el("div", { class: "foot" },
+    `${a.steps} passos · ${a.tokens.toLocaleString("pt-BR")} tokens · ${usd(a.cost_usd)} · ${(a.ms / 1000).toFixed(1)} s`));
+  return box;
+}
+
+let busy = false;
+async function ask() {
+  const text = q.value.trim();
+  if (!text || busy) return;
+  busy = true; send.disabled = true; q.value = ""; autosize();
+  $("#examples")?.remove();
+  log.append(el("div", { class: "q" }, text));
+  const thinking = el("div", { class: "thinking" }, "pensando");
+  log.append(thinking); scroll();
+  try {
+    const resp = await fetch("api/ask", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: text }),
+    });
+    if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).detail || resp.statusText);
+    const reader = resp.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const ev = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+        if (ev.type === "queued") thinking.textContent = "na fila (outras perguntas em andamento)";
+        else if (ev.type === "step") { thinking.textContent = "pensando"; thinking.before(renderStep(ev)); }
+        else if (ev.type === "answer") {
+          thinking.replaceWith(renderAnswer(ev));
+          showCost(ev.session_cost_usd, ev.questions);
+        }
+        else if (ev.type === "error") thinking.replaceWith(el("div", { class: "error" }, "Erro: " + ev.error));
+        scroll();
+      }
+    }
+  } catch (e) {
+    thinking.replaceWith(el("div", { class: "error" }, "Erro: " + e.message));
+  } finally {
+    thinking.remove(); busy = false; send.disabled = false; q.focus();
+  }
+}
+
+function autosize() { q.style.height = "auto"; q.style.height = Math.min(q.scrollHeight, 180) + "px"; }
+q.addEventListener("input", autosize);
+q.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
+$("#form").addEventListener("submit", (e) => { e.preventDefault(); ask(); });
+$("#showsql").addEventListener("change", (e) => document.querySelectorAll(".sqlbox").forEach(b => b.hidden = !e.target.checked));
+$("#reset").addEventListener("click", async () => {
+  await fetch("api/reset", { method: "POST" });
+  log.append(el("div", { class: "caption" }, "— contexto da conversa apagado —"));
+  scroll();
+});
+init();
+</script>
+</body>
+</html>

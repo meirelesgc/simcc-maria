@@ -18,13 +18,16 @@ dependencies = [
     "prompt-toolkit (>=3.0.53,<4.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "pgvector (>=0.5.0,<0.6.0)",
-    "numpy (>=2.5.3,<3.0.0)"
+    "numpy (>=2.5.3,<3.0.0)",
+    "fastapi (>=0.142.2,<0.143.0)",
+    "uvicorn[standard] (>=0.54.0,<0.55.0)"
 ]
 
 [project.scripts]
 ingest = "simcc_maria.ingest:main"
 load-db = "simcc_maria.load_db:main"
 maria = "simcc_maria.cli:main"
+maria-web = "simcc_maria.web:main"
 evaluate = "simcc_maria.evaluate:main"
 resolve-lattes = "simcc_maria.resolve_lattes:main"
 
