@@ -24,6 +24,32 @@ services:
       - ./logs:/app/logs                  # auditoria e custo: um JSONL por sessão
       - ./data/raw:/app/data/raw:ro       # só para o hash dos dados no log
 
+  # Scripts sem Python na máquina (ingest, load-db, maria, evaluate, pytest, mkdocs):
+  #   bin/run ingest · bin/run load-db · bin/run maria · bin/run pytest
+  # Monta o repositório inteiro: mudanças no código valem sem rebuild e os
+  # arquivos gerados (data/processed, logs) ficam na máquina.
+  tools:
+    profiles: [tools]  # não sobe com "docker compose up"
+    build:
+      context: .
+      args:
+        POETRY_GROUPS: dev,docs
+    image: simcc-maria-tools
+    env_file: .env
+    environment:
+      DATABASE_HOST: ${DATABASE_HOST:-db:5432}
+      GIT_COMMIT: ${GIT_COMMIT:-}
+    working_dir: /app
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"  # mkdocs serve; só publicada com "run --service-ports"
+    stdin_open: true
+    tty: true
+    networks:
+      - simcc
+    command: bash
+
 networks:
   simcc:
     external: true

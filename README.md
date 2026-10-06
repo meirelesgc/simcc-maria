@@ -20,6 +20,14 @@ poetry run mkdocs serve # documentação em http://127.0.0.1:8000
 
 Requer `.env` com `DATABASE_URL` e `OPENAI_API_KEY`.
 
+**Sem Python na máquina** (só Docker, com a stack do SIMCC rodando): `bin/setup`
+constrói a imagem de ferramentas e roda `ingest`, `load-db` e os testes.
+Qualquer comando acima roda com `bin/run` no lugar de `poetry run`
+(`bin/run maria`, `bin/run load-db --from links`, `bin/run pytest`;
+`bin/run docs` serve a documentação). O repositório é montado no container,
+então mudanças no código valem sem rebuild; após mudar dependências, rode
+`docker compose --profile tools build tools`.
+
 ## Dados
 
 | Arquivo | Conteúdo |

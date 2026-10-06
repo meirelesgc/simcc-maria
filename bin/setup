@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Prepara tudo do zero usando só Docker:
+#   imagem de ferramentas -> ingest (data/processed) -> load-db (schema maria) -> testes
+# Requer .env (DATABASE_URL, OPENAI_API_KEY) e a stack do SIMCC rodando.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[[ -f .env ]] || { echo "falta o .env (DATABASE_URL, OPENAI_API_KEY)" >&2; exit 1; }
+[[ -f data/raw/scholarships.parquet ]] || { echo "falta data/raw/scholarships.parquet" >&2; exit 1; }
+
+docker compose --profile tools build tools
+bin/run ingest
+bin/run load-db "$@"   # ex.: bin/setup --from links
+bin/run pytest -q
+
+echo "Pronto. Chat: bin/run maria · Web: docker compose up -d --build"

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Roda um comando do projeto no container "tools" (não precisa de Python na máquina).
+#   bin/run ingest                 bin/run maria
+#   bin/run load-db --from links   bin/run evaluate -k dengue
+#   bin/run pytest                 bin/run docs     (mkdocs em http://localhost:8000)
+#   bin/run                        (shell no container)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+export GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true)
+mkdir -p logs data/processed
+
+if [[ "${1:-}" == "docs" ]]; then
+  exec docker compose run --rm --service-ports tools mkdocs serve -a 0.0.0.0:8000
+fi
+exec docker compose run --rm tools "$@"
